@@ -1,0 +1,10 @@
+mode: "indexer"
+dbType: "postgres"
+dbHost: "localhost"
+dbPort: 5432
+dbUser: "user"
+dbPass: ""
+dbName: "postgres"
+graphqlEndpoint: "https://dton.io/{key}/graphql"
+userSyncWorkers: 32
+forceResyncOnEveryStart: true
