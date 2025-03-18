@@ -34,6 +34,12 @@ func main() {
 		&config.IdxSyncState{},
 	}
 
+	for _, table := range tables {
+		if err := db.AutoMigrate(table); err != nil {
+			panic(fmt.Sprintf("Migration error: %v", err))
+		}
+	}
+
 	if cfg.ForceResyncOnEveryStart {
 		fmt.Println("Force resync enabled, truncating all indexing tables...")
 		for _, table := range tables {
@@ -42,12 +48,6 @@ func main() {
 			}
 		}
 		fmt.Println("All tables truncated successfully.")
-	}
-
-	for _, table := range tables {
-		if err := db.AutoMigrate(table); err != nil {
-			panic(fmt.Sprintf("Migration error: %v", err))
-		}
 	}
 
 	config.EnsureInitialIdxSyncStateData(db)
