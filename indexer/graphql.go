@@ -79,8 +79,8 @@ type GraphQLTransactionsResponse struct {
 
 type GraphQLStatesResponse struct {
 	Data struct {
-		//RawAccountStates []State `json:"raw_account_states"`
-		RawAccountStates []State `json:"raw_transactions"`
+		RawAccountStates []State `json:"raw_account_states"`
+		//RawAccountStates []State `json:"raw_transactions"`
 	} `json:"data"`
 	Errors []interface{} `json:"errors"`
 }
@@ -187,15 +187,18 @@ func GetRawTransactions(url, address string, page_size, page int, utimeStart, ut
 }
 
 func GetRawState(url, userContractAddress string) (string, error) {
-	/*query := fmt.Sprintf(`
+	query := fmt.Sprintf(`
 	{
 		raw_account_states(
 			address__friendly: "%s"
+			page_size: 1
+			page: 0
 		) {
 			account_state_state_init_data
 		}
-	}`, userContractAddress)*/
-	query := fmt.Sprintf(`
+		
+	}`, userContractAddress)
+	/*query := fmt.Sprintf(`
 	{
 		raw_transactions(
 			address_friendly: "%s"
@@ -204,7 +207,7 @@ func GetRawState(url, userContractAddress string) (string, error) {
 		) {
 			account_state_state_init_data
 		}
-	}`, userContractAddress)
+	}`, userContractAddress)*/
 
 	payload := map[string]string{
 		"query": query,
