@@ -12,7 +12,7 @@ import (
 const (
 	MessageTypeLiquidation string = "liquidation"
 	MessageTypeSupply      string = "supply"
-	MessageTypeWithdraw    string = "withdaraw"
+	MessageTypeWithdraw    string = "withdraw"
 
 	MessageSubTypeBorrow   string = "borrow"
 	MessageSubTypeWithdraw string = "withdraw"
