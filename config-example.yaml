@@ -9,3 +9,4 @@ graphqlEndpoint: "https://dton.io/{key}/graphql"
 userSyncWorkers: 3
 forceResyncOnEveryStart: true
 migrateOnStart: true
+maxPageSize: 150

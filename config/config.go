@@ -92,6 +92,7 @@ type Config struct {
 	UserSyncWorkers int				`yaml:"userSyncWorkers"`
 	ForceResyncOnEveryStart bool	`yaml:"forceResyncOnEveryStart"`
 	MigrateOnStart	bool			`yaml:"migrateOnStart"`
+	MaxPageSize		int			`yaml:"maxPageSize"`
 }
 
 func LoadConfig(path string) (Config, error) {

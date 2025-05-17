@@ -145,7 +145,7 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 	}
 	lastUtime := state.LastUtime
 	//fmt.Printf("pool %s: current utime %d\n", lastUtime);
-	pageSize := 500
+	pageSize := cfg.MaxPageSize
 	transactions, lastUtime, err := ProcessTransactions(cfg.GraphQLEndpoint, pool.Address, lastUtime, pageSize)
 
 	if err != nil {
