@@ -49,4 +49,6 @@ dbName: "your_database"
 graphqlEndpoint: "https://dton.io/{your_api_key}/graphql"
 userSyncWorkers: 32 depends on your dton plan
 forceResyncOnEveryStart: false
+migrateOnStart: false
+maxPageSize: 150 # based on your dton plan
 ```
