@@ -6,5 +6,6 @@ dbUser: "user"
 dbPass: ""
 dbName: "postgres"
 graphqlEndpoint: "https://dton.io/{key}/graphql"
-userSyncWorkers: 32
+userSyncWorkers: 3
 forceResyncOnEveryStart: true
+migrateOnStart: true

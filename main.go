@@ -34,9 +34,11 @@ func main() {
 		&config.IdxSyncState{},
 	}
 
-	for _, table := range tables {
-		if err := db.AutoMigrate(table); err != nil {
-			panic(fmt.Sprintf("Migration error: %v", err))
+	if cfg.MigrateOnStart {
+		for _, table := range tables {
+			if err := db.AutoMigrate(table); err != nil {
+				panic(fmt.Sprintf("Migration error: %v", err))
+			}
 		}
 	}
 

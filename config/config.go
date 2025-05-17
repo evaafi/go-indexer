@@ -91,6 +91,7 @@ type Config struct {
 	GraphQLEndpoint string			`yaml:"graphqlEndpoint"`
 	UserSyncWorkers int				`yaml:"userSyncWorkers"`
 	ForceResyncOnEveryStart bool	`yaml:"forceResyncOnEveryStart"`
+	MigrateOnStart	bool			`yaml:"migrateOnStart"`
 }
 
 func LoadConfig(path string) (Config, error) {
