@@ -85,12 +85,14 @@ type UserFields struct {
 
 type IdxUsers struct {
 	UserFields
-	TonPrincipal   BigInt `gorm:"column:ton_principal;type:NUMERIC"`
-	JusdtPrincipal BigInt `gorm:"column:jusdt_principal;type:NUMERIC"`
-	JusdcPrincipal BigInt `gorm:"column:jusdc_principal;type:NUMERIC"`
-	StTonPrincipal BigInt `gorm:"column:stton_principal;type:NUMERIC"`
-	TsTonPrincipal BigInt `gorm:"column:tston_principal;type:NUMERIC"`
-	UsdtPrincipal  BigInt `gorm:"column:usdt_principal;type:NUMERIC"`
+	TonPrincipal   BigInt `gorm:"column:ton_principal;not null;default:0;type:NUMERIC"`
+	JusdtPrincipal BigInt `gorm:"column:jusdt_principal;not null;default:0;type:NUMERIC"`
+	JusdcPrincipal BigInt `gorm:"column:jusdc_principal;not null;default:0;type:NUMERIC"`
+	StTonPrincipal BigInt `gorm:"column:stton_principal;not null;default:0;type:NUMERIC"`
+	TsTonPrincipal BigInt `gorm:"column:tston_principal;not null;default:0;type:NUMERIC"`
+	UsdtPrincipal  BigInt `gorm:"column:usdt_principal;not null;default:0;type:NUMERIC"`
+	UsdePrincipal  BigInt `gorm:"column:usde_principal;not null;default:0;type:NUMERIC"`
+	TsUsdePrincipal  BigInt `gorm:"column:tsusde_principal;not null;default:0;type:NUMERIC"`
 }
 
 type IdxUsersAlts struct {

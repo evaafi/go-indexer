@@ -400,6 +400,8 @@ func makeUpdate(fut *FutureUpdate) {
 			TsTonPrincipal: config.BigInt{Int: userPrincipals[config.TsTonAssetId]},
 			UsdtPrincipal:  config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
 			TonPrincipal:   config.BigInt{Int: userPrincipals[config.TonAssetId]},
+			UsdePrincipal:   config.BigInt{Int: userPrincipals[config.UsdeAssetId]},
+			TsUsdePrincipal:   config.BigInt{Int: userPrincipals[config.TsUsdeAssetId]},
 		}
 
 		err = insertOrUpdate(db, state)
