@@ -16,11 +16,20 @@ import (
 var (
 	PoolParsers = make(map[string]*asset.Parser)
 	PoolPrices  = make(map[string]*price.Prices)
-	poolConfigs []struct {
-        Name   string
-        Config *sdkConfig.Config
-    }
+	poolConfigs = []struct {
+		Name   string
+		Config *sdkConfig.Config
+	}{
+		{Name: config.PoolMain.Name, Config: sdkConfig.GetMainMainnetConfig()},
+		/*	{Name: config.PoolLp.Name, Config: sdkConfig.GetLpMainnetConfig()},
+			{Name: config.PoolAlts.Name, Config: sdkConfig.GetAltsMainnetConfig()},*/
+	}
 )
+
+func init() {
+	go RunUpdatePoolsConfigPeriodically()
+	go StartUpdatePrices()
+}
 
 func StartUpdatePrices() {
 	go func() {
@@ -44,26 +53,15 @@ func StartUpdatePrices() {
 	}()
 }
 
-
 func RunUpdatePoolsConfigPeriodically() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 
-	poolConfigs = []struct {
-		Name   string
-		Config *sdkConfig.Config
-	}{
-		{Name: config.PoolMain.Name, Config: sdkConfig.GetMainMainnetConfig()},
-	/*	{Name: config.PoolLp.Name, Config: sdkConfig.GetLpMainnetConfig()},
-		{Name: config.PoolAlts.Name, Config: sdkConfig.GetAltsMainnetConfig()},*/
+	updatePoolsConfig()
+
+	for range ticker.C {
+		updatePoolsConfig()
 	}
-
-    ticker := time.NewTicker(5 * time.Minute)
-    defer ticker.Stop()
-
-    updatePoolsConfig()
-
-    for range ticker.C {
-        updatePoolsConfig()
-    }
 }
 
 func updatePoolsConfig() {
@@ -88,15 +86,14 @@ func updatePoolsConfig() {
 		}
 		assetsData, err := api.WaitForBlock(block.SeqNo).RunGetMethod(context.Background(), block, addr, "getAssetsData")
 		if err != nil {
-			// if contract exit code != 0 it will be treated as an error too
 			log.Println("error per getting getAssetsData")
 		}
 		assetsConfig, err := api.RunGetMethod(context.Background(), block, addr, "getAssetsConfig")
 		if err != nil {
-			// if contract exit code != 0 it will be treated as an error too
 			log.Println("error per getting assetsConfig")
 		}
 
 		parser.SetInfo(assetsData.MustCell(0).AsDict(256), assetsConfig.MustCell(0).AsDict(256))
+		PoolParsers[config.Name] = parser
 	}
 }
