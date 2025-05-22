@@ -16,6 +16,7 @@ import (
 	"os"
 
 	sdkConfig "github.com/evaafi/evaa-go-sdk/config"
+	"github.com/evaafi/evaa-go-sdk/principal"
 	sdkPrincipal "github.com/evaafi/evaa-go-sdk/principal"
 	"github.com/evaafi/go-indexer/config"
 	"github.com/xssnick/tonutils-go/address"
@@ -137,7 +138,7 @@ func corutineIndexer(ctx context.Context, cfg config.Config, pool config.Pool) {
 func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 	var db, _ = config.GetDBInstance()
 
-	var state config.IdxSyncState
+	var state config.IndexerSyncState
 	poolValue := pool.Name
 
 	if err := db.Where("pool = ?", poolValue).First(&state).Error; err != nil {
@@ -172,7 +173,7 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 		return false, fmt.Errorf("error updating IdxSyncState: %w", err)
 	}
 
-	var logs []config.IdxLog
+	var logs []config.OnchainLog
 
 	for _, tr := range transactions {
 		logVersion := 1
@@ -320,9 +321,11 @@ func handleErrorAndRequeue(fut *FutureUpdate, reason string, err error) {
 	}
 }
 
+const updateDelayBufferSeconds int64 = 60
+
 func makeUpdate(fut *FutureUpdate) {
 	//update := fut.CreatedAt
-	if fut.TxUtime > time.Now().Unix()-100 {
+	if fut.TxUtime > time.Now().Unix()-updateDelayBufferSeconds {
 		time.Sleep(sleepTime * time.Second)
 	}
 
@@ -334,14 +337,18 @@ func makeUpdate(fut *FutureUpdate) {
 	var (
 		service             *sdkPrincipal.Service
 		userContractAddress *address.Address
+		sdkPoolConfig       *sdkConfig.Config
 	)
 
 	if fut.Pool.Name == "main" {
-		service = sdkPrincipal.NewService(sdkConfig.GetMainMainnetConfig())
+		sdkPoolConfig = sdkConfig.GetMainMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "lp" {
-		service = sdkPrincipal.NewService(sdkConfig.GetLpMainnetConfig())
+		sdkPoolConfig = sdkConfig.GetLpMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "alts" {
-		service = sdkPrincipal.NewService(sdkConfig.GetAltsMainnetConfig())
+		sdkPoolConfig = sdkConfig.GetAltsMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	}
 	userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
 
@@ -378,60 +385,95 @@ func makeUpdate(fut *FutureUpdate) {
 	user := sdkPrincipal.NewUserSC(userContractAddress)
 	_, _ = user.SetAccData(data)
 
+	onchainUser := config.OnchainUser{}
+
 	userPrincipals := user.Principals()
-	userFields := config.UserFields{}
-	userFields.CodeVersion = int(user.CodeVersion())
-	userFields.ContractAddress = userContractAddress.String()
-	userFields.State = config.BigInt{Int: big.NewInt(user.UserState())}
-	if fut.CreatedAt > (fut.TxUtime + 100) {
-		userFields.UpdatedAt = time.Unix(fut.CreatedAt, 0)
+	onchainUser.Pool = fut.Pool.Name
+	onchainUser.CodeVersion = int(user.CodeVersion())
+	onchainUser.ContractAddress = userContractAddress.String()
+	onchainUser.State = config.BigInt{Int: big.NewInt(user.UserState())}
+	if fut.CreatedAt > (fut.TxUtime + updateDelayBufferSeconds) {
+		onchainUser.UpdatedAt = time.Unix(fut.CreatedAt, 0)
 	} else {
-		userFields.UpdatedAt = time.Unix(fut.TxUtime, 0)
+		onchainUser.UpdatedAt = time.Unix(fut.TxUtime, 0)
 	}
-	userFields.CreatedAt = time.Unix(fut.TxUtime, 0)
-	userFields.WalletAddress = fut.Address
+	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
+	onchainUser.WalletAddress = fut.Address
 
-	if fut.Pool.Name == "main" {
-		state := config.IdxUsers{
-			UserFields:     userFields,
-			JusdtPrincipal: config.BigInt{Int: userPrincipals[config.JusdtAssetId]},
-			JusdcPrincipal: config.BigInt{Int: userPrincipals[config.JusdcAssetId]},
-			StTonPrincipal: config.BigInt{Int: userPrincipals[config.StTonAssetId]},
-			TsTonPrincipal: config.BigInt{Int: userPrincipals[config.TsTonAssetId]},
-			UsdtPrincipal:  config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
-			TonPrincipal:   config.BigInt{Int: userPrincipals[config.TonAssetId]},
+	principalMap := make(config.Principals)
+	for name, asset := range sdkPoolConfig.Assets {
+		raw, ok := userPrincipals[name]
+		if !ok || raw == nil {
+			raw = big.NewInt(0)
 		}
-
-		err = insertOrUpdate(db, state)
-	} else if fut.Pool.Name == "lp" {
-		state := config.IdxUsersLp{
-			UserFields:             userFields,
-			TonStormPrincipal:      config.BigInt{Int: userPrincipals[config.TonStormAssetId]},
-			UsdtStormPrincipal:     config.BigInt{Int: userPrincipals[config.UsdtStormAssetId]},
-			TonUsdtDedustPrincipal: config.BigInt{Int: userPrincipals[config.TonUsdtDedustAssetId]},
-			UsdtPrincipal:          config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
-			TonPrincipal:           config.BigInt{Int: userPrincipals[config.TonAssetId]},
-		}
-
-		err = insertOrUpdate(db, state)
-	} else if fut.Pool.Name == "alts" {
-		state := config.IdxUsersAlts{
-			UserFields:    userFields,
-			NotPrincipal:  config.BigInt{Int: userPrincipals[config.NotAssetId]},
-			DogsPrincipal: config.BigInt{Int: userPrincipals[config.DogsAssetId]},
-			CatiPrincipal: config.BigInt{Int: userPrincipals[config.CatiAssetId]},
-			UsdtPrincipal: config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
-			TonPrincipal:  config.BigInt{Int: userPrincipals[config.TonAssetId]},
-		}
-
-		err = insertOrUpdate(db, state)
+		principalMap[config.BigInt{Int: asset.ID}] = config.BigInt{Int: raw}
 	}
+	err = insertOrUpdate(db, onchainUser)
 
 	if err != nil {
 		fmt.Printf("error per insertOrUpdate  %s\n", err)
 	}
 
-	if fut.CreatedAt < (fut.TxUtime + 100) {
+	if fut.CreatedAt < (fut.TxUtime + updateDelayBufferSeconds) {
 		fmt.Printf("user %s updated\n", userContractAddress.String())
+	}
+
+	ethenaNum, _ := new(big.Int).SetString("11876925370864614464799087627157805050745321306404563164673853337929163193738", 10)
+	ethenaAssetId := config.BigInt{Int: ethenaNum}
+	stEthenaNum, _ := new(big.Int).SetString("23103091784861387372100043848078515239542568751939923972799733728526040769767", 10)
+	stEthenaAssetId := config.BigInt{Int: stEthenaNum}
+
+	if fut.Pool.Name == config.PoolMain.Name && (principalMap[ethenaAssetId].Int != nil || principalMap[stEthenaAssetId].Int != nil) {
+		onchainUser.Principals = principalMap
+		if err := db.Save(&onchainUser).Error; err != nil {
+			fmt.Printf("error per saving principals %s\n", err)
+		}
+
+		parser := PoolParsers[fut.Pool.Name]
+		prices := PoolPrices[fut.Pool.Name]
+		
+		calculator := principal.NewService(sdkPoolConfig)
+		valueCalculator := principal.NewCalculator(parser, prices, sdkPoolConfig)
+
+		health := calculator.CalculateHealth(user, parser, prices)
+		totalDebt := health.TotalDebt
+		totalDebtCpy := new(big.Int).Set(totalDebt)
+		totalEthenaCollateral := big.NewInt(0)
+		if principalMap[ethenaAssetId].Int != nil {
+			value := valueCalculator.ValueFromPrincipal(principalMap[ethenaAssetId].Int, ethenaAssetId.String())
+			value.Div(value, parser.Config(ethenaAssetId.String()).CollateralFactor)
+			value.Mul(value, sdkPoolConfig.MasterParams.AssetCoefficientScale)
+			if value.Cmp(totalDebt) > 0 {
+				value = totalDebt
+			}
+
+			totalDebt.Sub(totalDebt, value)
+
+			totalEthenaCollateral.Add(totalEthenaCollateral, value)
+		}
+		if principalMap[stEthenaAssetId].Int != nil {
+			value := valueCalculator.ValueFromPrincipal(principalMap[stEthenaAssetId].Int, stEthenaAssetId.String())
+			value.Div(value, parser.Config(stEthenaAssetId.String()).CollateralFactor)
+			value.Mul(value, sdkPoolConfig.MasterParams.AssetCoefficientScale)
+			if value.Cmp(totalDebt) > 0 {
+				value = totalDebt
+			}
+			// totalDebt.Sub(totalDebt, value)
+
+			totalEthenaCollateral.Add(totalEthenaCollateral, value)
+		}
+
+		ethenaAsCollateralAddressHistory := config.EthenaAsCollateralAddressHistory{}
+		ethenaAsCollateralAddressHistory.CreatedAt = time.Unix(fut.TxUtime, 0)
+		ethenaAsCollateralAddressHistory.WalletAddress = fut.Address
+		ethenaAsCollateralAddressHistory.Pool = fut.Pool.Name
+		ethenaAsCollateralAddressHistory.EthenaCollateral = config.BigInt{Int: totalEthenaCollateral}
+		ethenaAsCollateralAddressHistory.TotalDebt = config.BigInt{Int: totalDebtCpy}
+		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&ethenaAsCollateralAddressHistory).Error; err != nil {
+			fmt.Printf("error per insert ethenaAsCollateralAddressHistory   %s\n", err)
+		}
+
+	} else {
+		fmt.Printf("user %s not updated\n", userContractAddress.String())
 	}
 }
