@@ -2,6 +2,7 @@ package config
 
 import (
 	"database/sql/driver"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -54,61 +55,68 @@ func GetTableName(db *gorm.DB, model interface{}) string {
 }
 
 type UserInterface interface {
-    GetWalletAddress() string
+	GetWalletAddress() string
 }
 
-func (u *UserFields) GetWalletAddress() string {
-    return u.WalletAddress
+func (u OnchainUser) GetWalletAddress() string {
+	return u.WalletAddress
 }
 
+type Principals map[BigInt]BigInt
 
-func (u IdxUsers) GetWalletAddress() string {
-    return u.WalletAddress
+func (p Principals) Value() (driver.Value, error) {
+	return json.Marshal(p)
 }
 
-func (u IdxUsersLp) GetWalletAddress() string {
-    return u.WalletAddress
+func (p *Principals) Scan(src interface{}) error {
+	bytes, ok := src.([]byte)
+	if !ok {
+		return fmt.Errorf("unable to scan Principals, src is %T", src)
+	}
+	return json.Unmarshal(bytes, p)
 }
 
-func (u IdxUsersAlts) GetWalletAddress() string {
-    return u.WalletAddress
+func (b BigInt) MarshalJSON() ([]byte, error) {
+	if b.Int == nil {
+		return []byte("null"), nil
+	}
+	return []byte(`"` + b.String() + `"`), nil
 }
 
-type UserFields struct {
-	WalletAddress   string    `gorm:"primaryKey;column:wallet_address"`
-	ContractAddress string    `gorm:"unique;column:contract_address;not null"`
-	CodeVersion     int       `gorm:"column:code_version;not null"`
-	CreatedAt       time.Time `gorm:"column:created_at;not null"`
-	UpdatedAt       time.Time `gorm:"column:updated_at;not null"`
-	State           BigInt    `gorm:"column:state;not null;type:NUMERIC"`
+func (b *BigInt) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		b.Int = big.NewInt(0)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	bi, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		return fmt.Errorf("BigInt: cannot parse %q", s)
+	}
+	b.Int = bi
+	return nil
 }
 
-type IdxUsers struct {
-	UserFields
-	TonPrincipal   BigInt `gorm:"column:ton_principal;type:NUMERIC"`
-	JusdtPrincipal BigInt `gorm:"column:jusdt_principal;type:NUMERIC"`
-	JusdcPrincipal BigInt `gorm:"column:jusdc_principal;type:NUMERIC"`
-	StTonPrincipal BigInt `gorm:"column:stton_principal;type:NUMERIC"`
-	TsTonPrincipal BigInt `gorm:"column:tston_principal;type:NUMERIC"`
-	UsdtPrincipal  BigInt `gorm:"column:usdt_principal;type:NUMERIC"`
+type OnchainUser struct {
+	WalletAddress   string     `gorm:"primaryKey;column:wallet_address"`
+	Pool            string     `gorm:"primaryKey;column:pool"`
+	ContractAddress string     `gorm:"unique;column:contract_address;not null"`
+	CodeVersion     int        `gorm:"column:code_version;not null"`
+	CreatedAt       time.Time  `gorm:"column:created_at;not null"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at;not null"`
+	State           BigInt     `gorm:"column:state;not null;type:NUMERIC"`
+	Principals      Principals `gorm:"column:principals;type:jsonb;not null;default:'{}'"`
 }
 
-type IdxUsersAlts struct {
-	UserFields
-	TonPrincipal  BigInt `gorm:"column:ton_principal;not null;default:0;type:NUMERIC"`
-	UsdtPrincipal BigInt `gorm:"column:usdt_principal;not null;default:0;type:NUMERIC"`
-	CatiPrincipal BigInt `gorm:"column:cati_principal;not null;default:0;type:NUMERIC"`
-	NotPrincipal  BigInt `gorm:"column:not_principal;not null;default:0;type:NUMERIC"`
-	DogsPrincipal BigInt `gorm:"column:dogs_principal;not null;default:0;type:NUMERIC"`
-}
-
-type IdxUsersLp struct {
-	UserFields
-	TonPrincipal           BigInt `gorm:"column:ton_principal;not null;default:0;type:NUMERIC"`
-	UsdtPrincipal          BigInt `gorm:"column:usdt_principal;not null;default:0;type:NUMERIC"`
-	TonUsdtDedustPrincipal BigInt `gorm:"column:tonusdt_dedust_principal;not null;default:0;type:NUMERIC"`
-	TonStormPrincipal      BigInt `gorm:"column:ton_storm_principal;not null;default:0;type:NUMERIC"`
-	UsdtStormPrincipal     BigInt `gorm:"column:usdt_storm_principal;not null;default:0;type:NUMERIC"`
+type EthenaAsCollateralAddressHistory struct {
+	WalletAddress   string     `gorm:"primaryKey;column:wallet_address"`
+	Pool            string     `gorm:"primaryKey;column:pool"`
+	CreatedAt       time.Time  `gorm:"primaryKey;column:created_at;not null"`
+	EthenaCollateral	BigInt    `gorm:"column:ethena_collateral;not null;type:NUMERIC"`
+	TotalDebt 		BigInt     `gorm:"column:total_debt;not null;type:NUMERIC"`
 }
 
 type BigInt struct {
@@ -147,12 +155,12 @@ func (b *BigInt) Scan(value interface{}) error {
 	return nil
 }
 
-type IdxLog struct {
+type OnchainLog struct {
 	Hash                              string    `gorm:"primaryKey;column:hash;type:string"`
 	Pool                              string    `gorm:"primaryKey;column:pool"`
 	Utime                             int64     `gorm:"column:utime;not null"`
 	TxType                            string    `gorm:"column:tx_type;not null"`
-	TxSubType						  string    `gorm:"column:tx_sub_type;"`
+	TxSubType                         string    `gorm:"column:tx_sub_type;"`
 	SenderAddress                     string    `gorm:"column:sender_address;not null"`
 	UserAddress                       string    `gorm:"column:user_address;not null"`
 	AttachedAssetAddress              BigInt    `gorm:"column:attached_asset_address;type:NUMERIC"`
@@ -172,21 +180,21 @@ type IdxLog struct {
 	CreatedAt                         time.Time `gorm:"column:created_at;default:now()"`
 }
 
-type IdxSyncState struct {
-	Pool   string 	`gorm:"primaryKey;column:pool"`
-	LastLt int64 	`gorm:"column:last_lt"`
-	LastUtime int64 `gorm:"column:last_utime"`
+type IndexerSyncState struct {
+	Pool      string `gorm:"primaryKey;column:pool"`
+	LastLt    int64  `gorm:"column:last_lt"`
+	LastUtime int64  `gorm:"column:last_utime"`
 }
 
 func EnsureInitialIdxSyncStateData(db *gorm.DB) {
-	initialData := []IdxSyncState{
+	initialData := []IndexerSyncState{
 		{Pool: "main", LastLt: 0, LastUtime: 1714879105},
 		{Pool: "alts", LastLt: 0, LastUtime: 1732117342},
 		{Pool: "lp", LastLt: 0, LastUtime: 1725205342},
 	}
 
 	for _, data := range initialData {
-		var existing IdxSyncState
+		var existing IndexerSyncState
 
 		err := db.First(&existing, "pool = ?", data.Pool).Error
 

@@ -24,23 +24,23 @@ const (
 	LogOpCodeLiquidateSuccess uint64 = 0x3
 )
 
-func ParseLogMessage(boc string, logVersion int) (config.IdxLog, error) {
+func ParseLogMessage(boc string, logVersion int) (config.OnchainLog, error) {
 
 	decoded, err := base64.StdEncoding.DecodeString(boc)
 	if err != nil {
-		return config.IdxLog{}, fmt.Errorf("error base64 decode boc log: %w", err)
+		return config.OnchainLog{}, fmt.Errorf("error base64 decode boc log: %w", err)
 	}
 
 	logCell, err := cell.FromBOC(decoded)
 	// fmt.Printf("%d", logce)
 	if err != nil {
-		return config.IdxLog{}, fmt.Errorf("error importing boc: %w", err)
+		return config.OnchainLog{}, fmt.Errorf("error importing boc: %w", err)
 	}
 
 	slc := logCell.BeginParse()
 	opCode, err := slc.LoadUInt(8)
 
-	var idxLog config.IdxLog
+	var idxLog config.OnchainLog
 	switch opCode {
 	case LogOpCodeSupplySuccess:
 		idxLog = MustParseSupplyMessage(slc, logVersion)
@@ -83,8 +83,8 @@ func ParseLogMessage(boc string, logVersion int) (config.IdxLog, error) {
 	return idxLog, err
 }
 
-func MustParseLiquidateMessage(slc *cell.Slice, logVersion int) config.IdxLog {
-	var idxLog config.IdxLog
+func MustParseLiquidateMessage(slc *cell.Slice, logVersion int) config.OnchainLog {
+	var idxLog config.OnchainLog
 
 	idxLog.UserAddress = slc.MustLoadAddr().String()
 	idxLog.SenderAddress = slc.MustLoadAddr().String()
@@ -116,8 +116,8 @@ func MustParseLiquidateMessage(slc *cell.Slice, logVersion int) config.IdxLog {
 	return idxLog
 }
 
-func MustParseWithdrawMessage(slc *cell.Slice, logVersion int) config.IdxLog {
-	var idxLog config.IdxLog
+func MustParseWithdrawMessage(slc *cell.Slice, logVersion int) config.OnchainLog {
+	var idxLog config.OnchainLog
 
 	idxLog.UserAddress = slc.MustLoadAddr().String()
 	idxLog.SenderAddress = slc.MustLoadAddr().String()
@@ -142,8 +142,8 @@ func MustParseWithdrawMessage(slc *cell.Slice, logVersion int) config.IdxLog {
 	return idxLog
 }
 
-func MustParseSupplyMessage(slc *cell.Slice, logVersion int) config.IdxLog {
-	var idxLog config.IdxLog
+func MustParseSupplyMessage(slc *cell.Slice, logVersion int) config.OnchainLog {
+	var idxLog config.OnchainLog
 
 	idxLog.UserAddress = slc.MustLoadAddr().String()
 	idxLog.SenderAddress = slc.MustLoadAddr().String()
