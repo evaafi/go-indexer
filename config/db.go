@@ -111,7 +111,6 @@ type OnchainUser struct {
 	Principals      Principals `gorm:"column:principals;type:jsonb;not null;default:'{}'"`
 }
 
-
 type BigInt struct {
 	*big.Int
 }
@@ -173,21 +172,21 @@ type OnchainLog struct {
 	CreatedAt                         time.Time `gorm:"column:created_at;default:now()"`
 }
 
-type IndexerSyncState struct {
+type OnchainSyncState struct {
 	Pool      string `gorm:"primaryKey;column:pool"`
 	LastLt    int64  `gorm:"column:last_lt"`
 	LastUtime int64  `gorm:"column:last_utime"`
 }
 
 func EnsureInitialIdxSyncStateData(db *gorm.DB) {
-	initialData := []IndexerSyncState{
+	initialData := []OnchainSyncState{
 		{Pool: "main", LastLt: 0, LastUtime: 1714879105},
 		{Pool: "alts", LastLt: 0, LastUtime: 1732117342},
 		{Pool: "lp", LastLt: 0, LastUtime: 1725205342},
 	}
 
 	for _, data := range initialData {
-		var existing IndexerSyncState
+		var existing OnchainSyncState
 
 		err := db.First(&existing, "pool = ?", data.Pool).Error
 

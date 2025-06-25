@@ -29,7 +29,7 @@ func main() {
 	tables := []interface{}{
 		&config.OnchainUser{},
 		&config.OnchainLog{},
-		&config.IndexerSyncState{},
+		&config.OnchainSyncState{},
 	}
 
 	if cfg.MigrateOnStart {

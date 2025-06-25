@@ -137,7 +137,7 @@ func corutineIndexer(ctx context.Context, cfg config.Config, pool config.Pool) {
 func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 	var db, _ = config.GetDBInstance()
 
-	var state config.IndexerSyncState
+	var state config.OnchainSyncState
 	poolValue := pool.Name
 
 	if err := db.Where("pool = ?", poolValue).First(&state).Error; err != nil {
