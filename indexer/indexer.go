@@ -16,7 +16,6 @@ import (
 	"os"
 
 	sdkConfig "github.com/evaafi/evaa-go-sdk/config"
-	"github.com/evaafi/evaa-go-sdk/principal"
 	sdkPrincipal "github.com/evaafi/evaa-go-sdk/principal"
 	"github.com/evaafi/go-indexer/config"
 	"github.com/xssnick/tonutils-go/address"
@@ -418,62 +417,8 @@ func makeUpdate(fut *FutureUpdate) {
 		fmt.Printf("user %s updated\n", userContractAddress.String())
 	}
 
-	ethenaNum, _ := new(big.Int).SetString("11876925370864614464799087627157805050745321306404563164673853337929163193738", 10)
-	ethenaAssetId := config.BigInt{Int: ethenaNum}
-	stEthenaNum, _ := new(big.Int).SetString("23103091784861387372100043848078515239542568751939923972799733728526040769767", 10)
-	stEthenaAssetId := config.BigInt{Int: stEthenaNum}
-
-	if fut.Pool.Name == config.PoolMain.Name && (principalMap[ethenaAssetId].Int != nil || principalMap[stEthenaAssetId].Int != nil) {
-		onchainUser.Principals = principalMap
-		if err := db.Save(&onchainUser).Error; err != nil {
-			fmt.Printf("error per saving principals %s\n", err)
-		}
-
-		parser := PoolParsers[fut.Pool.Name]
-		prices := PoolPrices[fut.Pool.Name]
-		
-		calculator := principal.NewService(sdkPoolConfig)
-		valueCalculator := principal.NewCalculator(parser, prices, sdkPoolConfig)
-
-		health := calculator.CalculateHealth(user, parser, prices)
-		totalDebt := health.TotalDebt
-		totalDebtCpy := new(big.Int).Set(totalDebt)
-		totalEthenaCollateral := big.NewInt(0)
-		if principalMap[ethenaAssetId].Int != nil {
-			value := valueCalculator.ValueFromPrincipal(principalMap[ethenaAssetId].Int, ethenaAssetId.String())
-			value.Div(value, parser.Config(ethenaAssetId.String()).CollateralFactor)
-			value.Mul(value, sdkPoolConfig.MasterParams.AssetCoefficientScale)
-			if value.Cmp(totalDebt) > 0 {
-				value = totalDebt
-			}
-
-			totalDebt.Sub(totalDebt, value)
-
-			totalEthenaCollateral.Add(totalEthenaCollateral, value)
-		}
-		if principalMap[stEthenaAssetId].Int != nil {
-			value := valueCalculator.ValueFromPrincipal(principalMap[stEthenaAssetId].Int, stEthenaAssetId.String())
-			value.Div(value, parser.Config(stEthenaAssetId.String()).CollateralFactor)
-			value.Mul(value, sdkPoolConfig.MasterParams.AssetCoefficientScale)
-			if value.Cmp(totalDebt) > 0 {
-				value = totalDebt
-			}
-			// totalDebt.Sub(totalDebt, value)
-
-			totalEthenaCollateral.Add(totalEthenaCollateral, value)
-		}
-
-		ethenaAsCollateralAddressHistory := config.EthenaAsCollateralAddressHistory{}
-		ethenaAsCollateralAddressHistory.CreatedAt = time.Unix(fut.TxUtime, 0)
-		ethenaAsCollateralAddressHistory.WalletAddress = fut.Address
-		ethenaAsCollateralAddressHistory.Pool = fut.Pool.Name
-		ethenaAsCollateralAddressHistory.EthenaCollateral = config.BigInt{Int: totalEthenaCollateral}
-		ethenaAsCollateralAddressHistory.TotalDebt = config.BigInt{Int: totalDebtCpy}
-		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&ethenaAsCollateralAddressHistory).Error; err != nil {
-			fmt.Printf("error per insert ethenaAsCollateralAddressHistory   %s\n", err)
-		}
-
-	} else {
-		fmt.Printf("user %s not updated\n", userContractAddress.String())
+	onchainUser.Principals = principalMap
+	if err := db.Save(&onchainUser).Error; err != nil {
+		fmt.Printf("error per saving principals %s\n", err)
 	}
 }

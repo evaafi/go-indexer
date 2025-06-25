@@ -103,7 +103,7 @@ func (b *BigInt) UnmarshalJSON(data []byte) error {
 type OnchainUser struct {
 	WalletAddress   string     `gorm:"primaryKey;column:wallet_address"`
 	Pool            string     `gorm:"primaryKey;column:pool"`
-	ContractAddress string     `gorm:"unique;column:contract_address;not null"`
+	ContractAddress string     `gorm:"primaryKey;unique;column:contract_address;not null"`
 	CodeVersion     int        `gorm:"column:code_version;not null"`
 	CreatedAt       time.Time  `gorm:"column:created_at;not null"`
 	UpdatedAt       time.Time  `gorm:"column:updated_at;not null"`
@@ -111,13 +111,6 @@ type OnchainUser struct {
 	Principals      Principals `gorm:"column:principals;type:jsonb;not null;default:'{}'"`
 }
 
-type EthenaAsCollateralAddressHistory struct {
-	WalletAddress   string     `gorm:"primaryKey;column:wallet_address"`
-	Pool            string     `gorm:"primaryKey;column:pool"`
-	CreatedAt       time.Time  `gorm:"primaryKey;column:created_at;not null"`
-	EthenaCollateral	BigInt    `gorm:"column:ethena_collateral;not null;type:NUMERIC"`
-	TotalDebt 		BigInt     `gorm:"column:total_debt;not null;type:NUMERIC"`
-}
 
 type BigInt struct {
 	*big.Int

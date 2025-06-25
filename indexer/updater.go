@@ -1,5 +1,5 @@
 package indexer
-
+/*
 import (
 	"context"
 	"log"
@@ -21,8 +21,8 @@ var (
 		Config *sdkConfig.Config
 	}{
 		{Name: config.PoolMain.Name, Config: sdkConfig.GetMainMainnetConfig()},
-		/*	{Name: config.PoolLp.Name, Config: sdkConfig.GetLpMainnetConfig()},
-			{Name: config.PoolAlts.Name, Config: sdkConfig.GetAltsMainnetConfig()},*/
+			{Name: config.PoolLp.Name, Config: sdkConfig.GetLpMainnetConfig()},
+			{Name: config.PoolAlts.Name, Config: sdkConfig.GetAltsMainnetConfig()},
 	}
 )
 
@@ -97,3 +97,4 @@ func updatePoolsConfig() {
 		PoolParsers[config.Name] = parser
 	}
 }
+*/

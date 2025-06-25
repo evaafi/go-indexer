@@ -30,7 +30,6 @@ func main() {
 		&config.OnchainUser{},
 		&config.OnchainLog{},
 		&config.IndexerSyncState{},
-		&config.EthenaAsCollateralAddressHistory{},
 	}
 
 	if cfg.MigrateOnStart {
