@@ -27,11 +27,9 @@ func main() {
 	}
 
 	tables := []interface{}{
-		&config.IdxUsers{},
-		&config.IdxUsersLp{},
-		&config.IdxUsersAlts{},
-		&config.IdxLog{},
-		&config.IdxSyncState{},
+		&config.OnchainUser{},
+		&config.OnchainLog{},
+		&config.OnchainSyncState{},
 	}
 
 	if cfg.MigrateOnStart {

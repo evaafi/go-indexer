@@ -137,7 +137,7 @@ func corutineIndexer(ctx context.Context, cfg config.Config, pool config.Pool) {
 func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 	var db, _ = config.GetDBInstance()
 
-	var state config.IdxSyncState
+	var state config.OnchainSyncState
 	poolValue := pool.Name
 
 	if err := db.Where("pool = ?", poolValue).First(&state).Error; err != nil {
@@ -172,7 +172,7 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 		return false, fmt.Errorf("error updating IdxSyncState: %w", err)
 	}
 
-	var logs []config.IdxLog
+	var logs []config.OnchainLog
 
 	for _, tr := range transactions {
 		logVersion := 1
@@ -320,9 +320,11 @@ func handleErrorAndRequeue(fut *FutureUpdate, reason string, err error) {
 	}
 }
 
+const updateDelayBufferSeconds int64 = 60
+
 func makeUpdate(fut *FutureUpdate) {
 	//update := fut.CreatedAt
-	if fut.TxUtime > time.Now().Unix()-100 {
+	if fut.TxUtime > time.Now().Unix()-updateDelayBufferSeconds {
 		time.Sleep(sleepTime * time.Second)
 	}
 
@@ -334,14 +336,21 @@ func makeUpdate(fut *FutureUpdate) {
 	var (
 		service             *sdkPrincipal.Service
 		userContractAddress *address.Address
+		sdkPoolConfig       *sdkConfig.Config
 	)
 
 	if fut.Pool.Name == "main" {
-		service = sdkPrincipal.NewService(sdkConfig.GetMainMainnetConfig())
+		sdkPoolConfig = sdkConfig.GetMainMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "lp" {
-		service = sdkPrincipal.NewService(sdkConfig.GetLpMainnetConfig())
+		sdkPoolConfig = sdkConfig.GetLpMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "alts" {
-		service = sdkPrincipal.NewService(sdkConfig.GetAltsMainnetConfig())
+		sdkPoolConfig = sdkConfig.GetAltsMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
+	} else if fut.Pool.Name == "stable" {
+		sdkPoolConfig = sdkConfig.GetStableMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	}
 	userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
 
@@ -378,62 +387,42 @@ func makeUpdate(fut *FutureUpdate) {
 	user := sdkPrincipal.NewUserSC(userContractAddress)
 	_, _ = user.SetAccData(data)
 
+	onchainUser := config.OnchainUser{}
+
 	userPrincipals := user.Principals()
-	userFields := config.UserFields{}
-	userFields.CodeVersion = int(user.CodeVersion())
-	userFields.ContractAddress = userContractAddress.String()
-	userFields.State = config.BigInt{Int: big.NewInt(user.UserState())}
-	if fut.CreatedAt > (fut.TxUtime + 100) {
-		userFields.UpdatedAt = time.Unix(fut.CreatedAt, 0)
+	onchainUser.Pool = fut.Pool.Name
+	onchainUser.CodeVersion = int(user.CodeVersion())
+	onchainUser.ContractAddress = userContractAddress.String()
+	onchainUser.State = config.BigInt{Int: big.NewInt(user.UserState())}
+	if fut.CreatedAt > (fut.TxUtime + updateDelayBufferSeconds) {
+		onchainUser.UpdatedAt = time.Unix(fut.CreatedAt, 0)
 	} else {
-		userFields.UpdatedAt = time.Unix(fut.TxUtime, 0)
+		onchainUser.UpdatedAt = time.Unix(fut.TxUtime, 0)
 	}
-	userFields.CreatedAt = time.Unix(fut.TxUtime, 0)
-	userFields.WalletAddress = fut.Address
+  onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
+	onchainUser.WalletAddress = fut.Address
 
-	if fut.Pool.Name == "main" {
-		state := config.IdxUsers{
-			UserFields:     userFields,
-			JusdtPrincipal: config.BigInt{Int: userPrincipals[config.JusdtAssetId]},
-			JusdcPrincipal: config.BigInt{Int: userPrincipals[config.JusdcAssetId]},
-			StTonPrincipal: config.BigInt{Int: userPrincipals[config.StTonAssetId]},
-			TsTonPrincipal: config.BigInt{Int: userPrincipals[config.TsTonAssetId]},
-			UsdtPrincipal:  config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
-			TonPrincipal:   config.BigInt{Int: userPrincipals[config.TonAssetId]},
-			UsdePrincipal:   config.BigInt{Int: userPrincipals[config.UsdeAssetId]},
-			TsUsdePrincipal:   config.BigInt{Int: userPrincipals[config.TsUsdeAssetId]},
+
+	principalMap := make(config.Principals)
+	for name, asset := range sdkPoolConfig.Assets {
+		raw, ok := userPrincipals[name]
+		if !ok || raw == nil {
+			raw = big.NewInt(0)
 		}
-
-		err = insertOrUpdate(db, state)
-	} else if fut.Pool.Name == "lp" {
-		state := config.IdxUsersLp{
-			UserFields:             userFields,
-			TonStormPrincipal:      config.BigInt{Int: userPrincipals[config.TonStormAssetId]},
-			UsdtStormPrincipal:     config.BigInt{Int: userPrincipals[config.UsdtStormAssetId]},
-			TonUsdtDedustPrincipal: config.BigInt{Int: userPrincipals[config.TonUsdtDedustAssetId]},
-			UsdtPrincipal:          config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
-			TonPrincipal:           config.BigInt{Int: userPrincipals[config.TonAssetId]},
-		}
-
-		err = insertOrUpdate(db, state)
-	} else if fut.Pool.Name == "alts" {
-		state := config.IdxUsersAlts{
-			UserFields:    userFields,
-			NotPrincipal:  config.BigInt{Int: userPrincipals[config.NotAssetId]},
-			DogsPrincipal: config.BigInt{Int: userPrincipals[config.DogsAssetId]},
-			CatiPrincipal: config.BigInt{Int: userPrincipals[config.CatiAssetId]},
-			UsdtPrincipal: config.BigInt{Int: userPrincipals[config.UsdtAssetId]},
-			TonPrincipal:  config.BigInt{Int: userPrincipals[config.TonAssetId]},
-		}
-
-		err = insertOrUpdate(db, state)
+		principalMap[config.BigInt{Int: asset.ID}] = config.BigInt{Int: raw}
 	}
+	err = insertOrUpdate(db, onchainUser)
 
 	if err != nil {
 		fmt.Printf("error per insertOrUpdate  %s\n", err)
 	}
 
-	if fut.CreatedAt < (fut.TxUtime + 100) {
+	if fut.CreatedAt < (fut.TxUtime + updateDelayBufferSeconds) {
 		fmt.Printf("user %s updated\n", userContractAddress.String())
+	}
+
+	onchainUser.Principals = principalMap
+	if err := db.Save(&onchainUser).Error; err != nil {
+		fmt.Printf("error per saving principals %s\n", err)
 	}
 }

@@ -8,7 +8,7 @@ The indexer performs the following tasks:
 
 1. Connects to a specified PostgreSQL database
 2. Creates required tables for storing indexed data:
-   - Main pool/lp pool/alts pool users
+   - Main pool/lp pool/alts pool/stable pool users
    - Operation logs
 3. Indexes blockchain data using [DTON](https://dton.io/) GraphQL API
 4. Continuously updates indexed data to stay in sync with blockchain
