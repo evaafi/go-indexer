@@ -81,6 +81,7 @@ func (b BigInt) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return []byte(`"` + b.String() + `"`), nil
+}
 
 func (b *BigInt) UnmarshalJSON(data []byte) error {
 	if len(data) == 0 || string(data) == "null" {
