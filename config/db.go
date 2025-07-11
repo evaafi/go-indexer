@@ -183,6 +183,7 @@ func EnsureInitialIdxSyncStateData(db *gorm.DB) {
 		{Pool: "main", LastLt: 0, LastUtime: 1714879105},
 		{Pool: "alts", LastLt: 0, LastUtime: 1732117342},
 		{Pool: "lp", LastLt: 0, LastUtime: 1725205342},
+		{Pool: "stable", LastLt: 0, LastUtime: 1751328000},
 	}
 
 	for _, data := range initialData {

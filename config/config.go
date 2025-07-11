@@ -44,10 +44,15 @@ var (
 		Name: "alts",
 		Address: "EQANURVS3fhBO9bivig34iyJQi97FhMbpivo1aUEAS2GYSu-",
 	}
+	PoolStable = Pool {
+		Name: "stable",
+		Address: "EQCdIdXf1kA_2Hd9mbGzSFDEPA-Px-et8qTWHEXgRGo0K3zd",
+	}
 	Pools = []Pool {
 		PoolMain,
 		PoolLp,
 		PoolAlts,
+		PoolStable,
 	}
  	/*AssetMapping = map[string]*big.Int{
 		"ton":             mustParseBigInt("11876925370864614464799087627157805050745321306404563164673853337929163193738"),

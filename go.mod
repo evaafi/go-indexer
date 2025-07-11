@@ -3,7 +3,7 @@ module github.com/evaafi/go-indexer
 go 1.24.0
 
 require (
-	github.com/evaafi/evaa-go-sdk v0.0.0-20250317112158-6574873146b6 // indirect
+	github.com/evaafi/evaa-go-sdk v0.0.0-20250711150531-b1f2c1e8c880 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/pgx/v5 v5.7.2 // indirect

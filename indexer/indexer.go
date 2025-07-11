@@ -348,6 +348,9 @@ func makeUpdate(fut *FutureUpdate) {
 	} else if fut.Pool.Name == "alts" {
 		sdkPoolConfig = sdkConfig.GetAltsMainnetConfig()
 		service = sdkPrincipal.NewService(sdkPoolConfig)
+	} else if fut.Pool.Name == "stable" {
+		sdkPoolConfig = sdkConfig.GetStableMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
 	}
 	userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
 
