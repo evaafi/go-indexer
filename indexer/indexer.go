@@ -320,7 +320,7 @@ func handleErrorAndRequeue(fut *FutureUpdate, reason string, err error) {
 	}
 }
 
-const updateDelayBufferSeconds int64 = 60
+const updateDelayBufferSeconds int64 = 30
 
 func makeUpdate(fut *FutureUpdate) {
 	//update := fut.CreatedAt
