@@ -39,7 +39,7 @@ type MapKey struct {
 var (
 	updateMap   sync.Map
 	updateQueue               = make(chan FutureUpdate, 30000)
-	sleepTime   time.Duration = 60
+	sleepTime   time.Duration = 30
 	Shutdown                  = make(chan struct{})
 	WG          sync.WaitGroup
 )
