@@ -399,7 +399,7 @@ func makeUpdate(fut *FutureUpdate) {
 	} else {
 		onchainUser.UpdatedAt = time.Unix(fut.TxUtime, 0)
 	}
-  onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
+  	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
 	onchainUser.WalletAddress = fut.Address
 
 
