@@ -402,15 +402,26 @@ func makeUpdate(fut *FutureUpdate) {
   	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
 	onchainUser.WalletAddress = fut.Address
 
-
 	principalMap := make(config.Principals)
-	for name, asset := range sdkPoolConfig.Assets {
-		raw, ok := userPrincipals[name]
-		if !ok || raw == nil {
+
+	for name, raw := range userPrincipals {
+		if raw == nil {
 			raw = big.NewInt(0)
 		}
-		principalMap[config.BigInt{Int: asset.ID}] = config.BigInt{Int: raw}
+		id := new(big.Int)
+		id.SetString(name, 10)
+
+		principalMap[config.BigInt{Int: id}] = config.BigInt{Int: new(big.Int).Set(raw)}
 	}
+
+	for _, asset := range sdkPoolConfig.Assets {
+		key := config.BigInt{Int: new(big.Int).Set(asset.ID)}
+		if _, ok := principalMap[key]; !ok {
+			principalMap[key] = config.BigInt{Int: big.NewInt(0)}
+		}
+	}
+
+	onchainUser.Principals = principalMap
 	err = insertOrUpdate(db, onchainUser)
 
 	if err != nil {
