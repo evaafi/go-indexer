@@ -422,7 +422,6 @@ func makeUpdate(fut *FutureUpdate) {
 	onchainUser.Principals = normalizedPrincipals
 
 	if err := insertOrUpdate(db, onchainUser); err != nil {
-		return err
+		fmt.Printf("error per insertOrUpdate  %s\n", err)
 	}
-	return nil
 }
