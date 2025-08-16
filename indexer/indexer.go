@@ -402,38 +402,27 @@ func makeUpdate(fut *FutureUpdate) {
   	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
 	onchainUser.WalletAddress = fut.Address
 
-	principalMap := make(config.Principals)
-
+	principalsByID := make(map[string]*big.Int)
 	for name, raw := range userPrincipals {
 		if raw == nil {
 			raw = big.NewInt(0)
 		}
-		id := new(big.Int)
-		id.SetString(name, 10)
-
-		principalMap[config.BigInt{Int: id}] = config.BigInt{Int: new(big.Int).Set(raw)}
+		principalsByID[name] = raw
 	}
-
+	normalizedPrincipals := make(config.Principals)
 	for _, asset := range sdkPoolConfig.Assets {
-		key := config.BigInt{Int: new(big.Int).Set(asset.ID)}
-		if _, ok := principalMap[key]; !ok {
-			principalMap[key] = config.BigInt{Int: big.NewInt(0)}
+		idStr := asset.ID.String()
+		value := big.NewInt(0)
+		if v, ok := principalsByID[idStr]; ok && v != nil {
+			value = new(big.Int).Set(v)
 		}
+		key := config.BigInt{Int: new(big.Int).Set(asset.ID)}
+		normalizedPrincipals[key] = config.BigInt{Int: value}
 	}
+	onchainUser.Principals = normalizedPrincipals
 
-	onchainUser.Principals = principalMap
-	err = insertOrUpdate(db, onchainUser)
-
-	if err != nil {
-		fmt.Printf("error per insertOrUpdate  %s\n", err)
+	if err := insertOrUpdate(db, onchainUser); err != nil {
+		return err
 	}
-
-	if fut.CreatedAt < (fut.TxUtime + updateDelayBufferSeconds) {
-		fmt.Printf("user %s updated\n", userContractAddress.String())
-	}
-
-	onchainUser.Principals = principalMap
-	if err := db.Save(&onchainUser).Error; err != nil {
-		fmt.Printf("error per saving principals %s\n", err)
-	}
+	return nil
 }
