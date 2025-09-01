@@ -6,7 +6,13 @@ dbUser: "user"
 dbPass: ""
 dbName: "postgres"
 graphqlEndpoint: "https://dton.io/{key}/graphql"
+toncenterApiKey: ""
 userSyncWorkers: 3
 forceResyncOnEveryStart: true
-migrateOnStart: true
-maxPageSize: 150
+migrateOnStart: false
+maxPageSize: 100
+# TON Center rate limit: requests per second and burst size
+# Example: 5 rps with burst 10
+# Set to 0 to disable limiter (not recommended)
+toncenterRPS: 5
+toncenterBurst: 10

@@ -101,6 +101,7 @@ func RunIndexer(ctx context.Context, cfg config.Config) {
 	}
 
 	for i := 0; i < cfg.UserSyncWorkers; i++ {
+		fmt.Printf("starting user state worker %d/%d\n", i+1, cfg.UserSyncWorkers)
 		WG.Add(1)
 		go worker(updateQueue, &WG)
 	}
@@ -108,6 +109,206 @@ func RunIndexer(ctx context.Context, cfg config.Config) {
 	for _, pool := range config.Pools {
 		fmt.Printf("starting %s indexer \n", pool.Name)
 		go corutineIndexer(ctx, cfg, pool)
+	}
+
+	// periodic full reindex: immediately on start and every 24 hours
+	go func() {
+		ReindexAllUsersFromTonCenter(ctx, cfg)
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ReindexAllUsersFromTonCenter(ctx, cfg)
+			}
+		}
+	}()
+}
+
+// applyUserStateBoc decodes base64 BOC and updates the onchain user for given wallet and pool.
+func applyUserStateBoc(pool config.Pool, walletAddress string, contractAddress string, dataBocBase64 string, txUtime int64) error {
+	db, _ := config.GetDBInstance()
+
+	decoded, err := base64.StdEncoding.DecodeString(dataBocBase64)
+	if err != nil {
+		return fmt.Errorf("failed to decode base64 user state: %w", err)
+	}
+	dataCell, err := cell.FromBOC(decoded)
+	if err != nil {
+		return fmt.Errorf("failed to create boc from base64 user state: %w", err)
+	}
+
+	var (
+		service       *sdkPrincipal.Service
+		sdkPoolConfig *sdkConfig.Config
+	)
+	if pool.Name == "main" {
+		sdkPoolConfig = sdkConfig.GetMainMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
+	} else if pool.Name == "lp" {
+		sdkPoolConfig = sdkConfig.GetLpMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
+	} else if pool.Name == "alts" {
+		sdkPoolConfig = sdkConfig.GetAltsMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
+	} else if pool.Name == "stable" {
+		sdkPoolConfig = sdkConfig.GetStableMainnetConfig()
+		service = sdkPrincipal.NewService(sdkPoolConfig)
+	}
+
+	// calculate contract if not provided
+	if contractAddress == "" {
+		userContractAddress, _ := service.CalculateUserSCAddress(address.MustParseAddr(walletAddress))
+		contractAddress = userContractAddress.String()
+	}
+
+	userSC := sdkPrincipal.NewUserSC(address.MustParseAddr(contractAddress))
+	_, _ = userSC.SetAccData(dataCell)
+
+	onchainUser := config.OnchainUser{}
+	userPrincipals := userSC.Principals()
+	onchainUser.Pool = pool.Name
+	onchainUser.CodeVersion = int(userSC.CodeVersion())
+	onchainUser.ContractAddress = contractAddress
+	onchainUser.State = config.BigInt{Int: big.NewInt(userSC.UserState())}
+	onchainUser.UpdatedAt = time.Unix(txUtime, 0)
+	onchainUser.CreatedAt = time.Unix(txUtime, 0)
+	onchainUser.WalletAddress = walletAddress
+
+	principalsByID := make(map[string]*big.Int)
+	for name, raw := range userPrincipals {
+		if raw == nil {
+			raw = big.NewInt(0)
+		}
+		principalsByID[name] = raw
+	}
+	normalizedPrincipals := make(config.Principals)
+	for _, asset := range sdkPoolConfig.Assets {
+		idStr := asset.ID.String()
+		value := big.NewInt(0)
+		if v, ok := principalsByID[idStr]; ok && v != nil {
+			value = new(big.Int).Set(v)
+		}
+		key := config.BigInt{Int: new(big.Int).Set(asset.ID)}
+		normalizedPrincipals[key] = config.BigInt{Int: value}
+	}
+	onchainUser.Principals = normalizedPrincipals
+
+	if err := insertOrUpdate(db, onchainUser); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ReindexAllUsersFromTonCenter refreshes all known user states by fetching account states from TON Center.
+func ReindexAllUsersFromTonCenter(ctx context.Context, cfg config.Config) {
+	db, _ := config.GetDBInstance()
+
+	type minimalUser struct {
+		WalletAddress   string
+		Pool            string
+		ContractAddress string
+	}
+
+	var rows []minimalUser
+	if err := db.Model(&config.OnchainUser{}).
+		Select("wallet_address", "pool", "contract_address").
+		Find(&rows).Error; err != nil {
+		fmt.Printf("reindex: failed to load users: %v\n", err)
+		return
+	}
+
+	if len(rows) == 0 {
+		fmt.Println("reindex: no users to refresh")
+		return
+	}
+
+	// group by pool and build contract->wallet for O(1) lookup
+	poolToContracts := make(map[string][]string)
+	contractToWallet := make(map[string]map[string]string) // pool -> contract -> wallet
+	for _, u := range rows {
+		if contractToWallet[u.Pool] == nil {
+			contractToWallet[u.Pool] = make(map[string]string)
+		}
+		// deduplicate contracts per pool
+		if _, exists := contractToWallet[u.Pool][u.ContractAddress]; !exists {
+			poolToContracts[u.Pool] = append(poolToContracts[u.Pool], u.ContractAddress)
+		}
+		contractToWallet[u.Pool][u.ContractAddress] = u.WalletAddress
+	}
+
+	// batch size for TON Center accountStates; conservative default
+	batchSize := 100
+
+	for _, pool := range config.Pools {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		contracts := poolToContracts[pool.Name]
+		if len(contracts) == 0 {
+			continue
+		}
+
+		total := len(contracts)
+		success := 0
+		failures := 0
+		for i := 0; i < total; i += batchSize {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			end := i + batchSize
+			if end > total {
+				end = total
+			}
+			batch := contracts[i:end]
+
+			resp, err := fetchTonCenterAccountStates(cfg.TonCenterAPIKey, batch)
+			if err != nil {
+				failures += len(batch)
+				maxShow := 3
+				if len(batch) < maxShow {
+					maxShow = len(batch)
+				}
+				fmt.Printf("reindex: toncenter error pool=%s batch=%d-%d/%d size=%d sample=%v err=%v\n", pool.Name, i+1, end, total, len(batch), batch[:maxShow], err)
+				continue
+			}
+
+			now := time.Now().Unix()
+
+			// Only process addresses that were requested in this batch to avoid duplicates (raw vs friendly)
+			for _, contractAddr := range batch {
+				dataBoc := resp[contractAddr]
+				if dataBoc == "" {
+					// quietly skip empty state
+					continue
+				}
+				wallet := contractToWallet[pool.Name][contractAddr]
+				if wallet == "" {
+					// unexpected, but skip quietly
+					continue
+				}
+				if err := applyUserStateBoc(pool, wallet, contractAddr, dataBoc, now); err != nil {
+					failures++
+					bocPrefix := dataBoc
+					if len(bocPrefix) > 16 {
+						bocPrefix = bocPrefix[:16]
+					}
+					fmt.Printf("reindex: apply_state_err pool=%s addr=%s wallet=%s boc_len=%d boc_prefix=%s err=%v\n", pool.Name, contractAddr, wallet, len(dataBoc), bocPrefix, err)
+					continue
+				}
+				success++
+			}
+			fmt.Printf("reindex: pool=%s progress %d/%d (ok=%d, fail=%d)\n", pool.Name, end, total, success, failures)
+		}
+		fmt.Printf("reindex: pool=%s finished (ok=%d, fail=%d)\n", pool.Name, success, failures)
 	}
 }
 
@@ -153,7 +354,9 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 	}
 
 	if len(transactions) == 0 && time.Now().Unix() > lastUtime+config.UtimeAddendum {
+		// advance and persist sync state when window is empty but time has moved forward
 		lastUtime += config.UtimeAddendum
+		state.LastUtime = lastUtime
 		if err := db.Save(&state).Error; err != nil {
 			return false, fmt.Errorf("error updating IdxSyncState: %w", err)
 		}
@@ -175,6 +378,11 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 	var logs []config.OnchainLog
 
 	for _, tr := range transactions {
+		// Skip already processed transactions by hash+pool to avoid re-queuing the same user repeatedly
+		var existingCount int64
+		if err := db.Model(&config.OnchainLog{}).Where("hash = ? AND pool = ?", tr.Hash, pool.Name).Count(&existingCount).Error; err == nil && existingCount > 0 {
+			continue
+		}
 		logVersion := 1
 
 		if pool.Name == "lp" && tr.LT < 49712577000001 || pool.Name == "main" && tr.LT < 49828980000001 {
@@ -201,6 +409,7 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 			key := MapKey{Address: idxLog.UserAddress, PoolName: pool.Name}
 
 			if _, ok := updateMap.Load(key); ok {
+				fmt.Printf("update skip duplicate %s (%s)\n", idxLog.UserAddress, pool.Name)
 				continue
 			}
 
@@ -212,6 +421,7 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 			}
 			updateMap.Store(key, fut)
 			updateQueue <- fut
+			fmt.Printf("update queued %s (%s) tx_utime=%d\n", idxLog.UserAddress, pool.Name, idxLog.Utime)
 
 		}
 	}
@@ -331,7 +541,7 @@ func makeUpdate(fut *FutureUpdate) {
 	key := MapKey{Address: fut.Address, PoolName: fut.Pool.Name}
 	defer updateMap.Delete(key)
 
-	db, _ := config.GetDBInstance()
+	// no direct DB access here; persistence is handled in applyUserStateBoc
 
 	var (
 		service             *sdkPrincipal.Service
@@ -354,86 +564,31 @@ func makeUpdate(fut *FutureUpdate) {
 	}
 	userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
 
-	rawState, err := GetRawState(config.CFG.GraphQLEndpoint, userContractAddress.String())
-
+	// Switch to TON Center: get account state BOC and apply
+	resp, err := fetchTonCenterAccountStates(config.CFG.TonCenterAPIKey, []string{userContractAddress.String()})
 	if err != nil {
-		handleErrorAndRequeue(fut, "failed to get user state", err)
+		handleErrorAndRequeue(fut, "failed to get user state from toncenter", err)
+		return
+	}
+	dataBocBase64 := resp[userContractAddress.String()]
+	if dataBocBase64 == "" {
+		for _, v := range resp {
+			dataBocBase64 = v
+			break
+		}
+	}
+	if dataBocBase64 == "" {
+		handleErrorAndRequeue(fut, fmt.Sprintf("toncenter returned empty state for %s", userContractAddress.String()), nil)
 		return
 	}
 
-	var userStateResponse GraphQLStatesResponse
-	if err := json.Unmarshal([]byte(rawState), &userStateResponse); err != nil {
-		handleErrorAndRequeue(fut, fmt.Sprintf("failed to unmarshal user state %s", rawState), err)
-		return
-	}
-
-	if len(userStateResponse.Data.RawAccountStates) == 0 {
-		handleErrorAndRequeue(fut, fmt.Sprintf("cannot get user state: %s %s %s %s, %s; adding again to queue", fut.Address, userContractAddress.String(), fut.Pool, rawState, userStateResponse.Data), nil)
-		return
-	}
-
-	dataBoc, err := base64.StdEncoding.DecodeString(userStateResponse.Data.RawAccountStates[0].State)
-	if err != nil {
-		handleErrorAndRequeue(fut, fmt.Sprintf("failed to decode base64 user state: %s %s", userStateResponse.Data.RawAccountStates[0].State, userContractAddress.String()), err)
-		return
-	}
-
-	data, err := cell.FromBOC(dataBoc)
-	if err != nil {
-		handleErrorAndRequeue(fut, fmt.Sprintf("failed to create boc from base64 user state: %s", userContractAddress.String()), err)
-		return
-	}
-
-	user := sdkPrincipal.NewUserSC(userContractAddress)
-	_, _ = user.SetAccData(data)
-
-	onchainUser := config.OnchainUser{}
-
-	userPrincipals := user.Principals()
-	onchainUser.Pool = fut.Pool.Name
-	onchainUser.CodeVersion = int(user.CodeVersion())
-	onchainUser.ContractAddress = userContractAddress.String()
-	onchainUser.State = config.BigInt{Int: big.NewInt(user.UserState())}
+	ts := fut.TxUtime
 	if fut.CreatedAt > (fut.TxUtime + updateDelayBufferSeconds) {
-		onchainUser.UpdatedAt = time.Unix(fut.CreatedAt, 0)
-	} else {
-		onchainUser.UpdatedAt = time.Unix(fut.TxUtime, 0)
+		ts = fut.CreatedAt
 	}
-  	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
-	onchainUser.WalletAddress = fut.Address
-
-	principalMap := make(config.Principals)
-
-	for name, raw := range userPrincipals {
-		if raw == nil {
-			raw = big.NewInt(0)
-		}
-		id := new(big.Int)
-		id.SetString(name, 10)
-
-		principalMap[config.BigInt{Int: id}] = config.BigInt{Int: new(big.Int).Set(raw)}
+	if err := applyUserStateBoc(fut.Pool, fut.Address, userContractAddress.String(), dataBocBase64, ts); err != nil {
+		handleErrorAndRequeue(fut, "failed to apply user state", err)
+		return
 	}
-
-	for _, asset := range sdkPoolConfig.Assets {
-		key := config.BigInt{Int: new(big.Int).Set(asset.ID)}
-		if _, ok := principalMap[key]; !ok {
-			principalMap[key] = config.BigInt{Int: big.NewInt(0)}
-		}
-	}
-
-	onchainUser.Principals = principalMap
-	err = insertOrUpdate(db, onchainUser)
-
-	if err != nil {
-		fmt.Printf("error per insertOrUpdate  %s\n", err)
-	}
-
-	if fut.CreatedAt < (fut.TxUtime + updateDelayBufferSeconds) {
-		fmt.Printf("user %s updated\n", userContractAddress.String())
-	}
-
-	onchainUser.Principals = principalMap
-	if err := db.Save(&onchainUser).Error; err != nil {
-		fmt.Printf("error per saving principals %s\n", err)
-	}
+	fmt.Printf("user %s updated (pool %s)\n", userContractAddress.String(), fut.Pool.Name)
 }

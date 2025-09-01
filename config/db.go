@@ -56,10 +56,15 @@ func GetTableName(db *gorm.DB, model interface{}) string {
 
 type UserInterface interface {
 	GetWalletAddress() string
+	GetPool() string
 }
 
 func (u OnchainUser) GetWalletAddress() string {
 	return u.WalletAddress
+}
+
+func (u OnchainUser) GetPool() string {
+	return u.Pool
 }
 
 type Principals map[BigInt]BigInt
