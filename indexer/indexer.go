@@ -25,10 +25,11 @@ import (
 )
 
 type FutureUpdate struct {
-	Address   string
-	CreatedAt int64
-	Pool      config.Pool
-	TxUtime   int64
+	Address         string
+	ContractAddress string
+	CreatedAt       int64
+	Pool            config.Pool
+	TxUtime         int64
 }
 
 type MapKey struct {
@@ -205,10 +206,11 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 			}
 
 			fut := FutureUpdate{
-				Address:   idxLog.UserAddress,
-				CreatedAt: time.Now().Unix(),
-				Pool:      pool,
-				TxUtime:   idxLog.Utime,
+				Address:         idxLog.UserAddress,
+				ContractAddress: idxLog.SenderAddress,
+				CreatedAt:       time.Now().Unix(),
+				Pool:            pool,
+				TxUtime:         idxLog.Utime,
 			}
 			updateMap.Store(key, fut)
 			updateQueue <- fut
@@ -333,26 +335,19 @@ func makeUpdate(fut *FutureUpdate) {
 
 	db, _ := config.GetDBInstance()
 
-	var (
-		service             *sdkPrincipal.Service
-		userContractAddress *address.Address
-		sdkPoolConfig       *sdkConfig.Config
-	)
+	var userContractAddress = address.MustParseAddr(fut.ContractAddress)
+	var sdkPoolConfig *sdkConfig.Config
 
 	if fut.Pool.Name == "main" {
 		sdkPoolConfig = sdkConfig.GetMainMainnetConfig()
-		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "lp" {
 		sdkPoolConfig = sdkConfig.GetLpMainnetConfig()
-		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "alts" {
 		sdkPoolConfig = sdkConfig.GetAltsMainnetConfig()
-		service = sdkPrincipal.NewService(sdkPoolConfig)
 	} else if fut.Pool.Name == "stable" {
 		sdkPoolConfig = sdkConfig.GetStableMainnetConfig()
-		service = sdkPrincipal.NewService(sdkPoolConfig)
 	}
-	userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
+	//userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
 
 	rawState, err := GetRawState(config.CFG.GraphQLEndpoint, userContractAddress.String())
 
@@ -399,7 +394,7 @@ func makeUpdate(fut *FutureUpdate) {
 	} else {
 		onchainUser.UpdatedAt = time.Unix(fut.TxUtime, 0)
 	}
-  	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
+	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
 	onchainUser.WalletAddress = fut.Address
 
 	principalsByID := make(map[string]*big.Int)
