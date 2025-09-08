@@ -137,8 +137,8 @@ func MustParseWithdrawMessage(slc *cell.Slice, logVersion int) config.OnchainLog
 		idxLog.SubaccountID = int16(slc.MustLoadInt(16))
 	} else {
 		idxLog.SubaccountID = 0
+		slc.MustLoadRef()
 	}
-	slc.MustLoadRef()
 
 	redeemedAssetData := slc.MustLoadRef()
 	idxLog.RedeemedAssetAddress = config.BigInt{Int: redeemedAssetData.MustLoadBigUInt(256)}
