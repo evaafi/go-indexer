@@ -95,6 +95,12 @@ func MustParseLiquidateMessage(slc *cell.Slice, logVersion int) config.OnchainLo
 
 	idxLog.Utime = int64(slc.MustLoadUInt(32))
 
+	if slc.BitsLeft() == 16 { // todo rm all bitsleft checks, replace with check logVersion after release
+		idxLog.SubaccountID = int16(slc.MustLoadInt(16))
+	} else {
+		idxLog.SubaccountID = 0
+	}
+
 	loanAssetData := slc.MustLoadRef()
 	idxLog.AttachedAssetAddress = config.BigInt{Int: loanAssetData.MustLoadBigUInt(256)}
 	idxLog.AttachedAssetAmount = config.BigInt{Int: loanAssetData.MustLoadBigUInt(64)}
@@ -127,7 +133,11 @@ func MustParseWithdrawMessage(slc *cell.Slice, logVersion int) config.OnchainLog
 	}
 
 	idxLog.Utime = int64(slc.MustLoadUInt(32))
-
+	if slc.BitsLeft() == 16 {
+		idxLog.SubaccountID = int16(slc.MustLoadInt(16))
+	} else {
+		idxLog.SubaccountID = 0
+	}
 	slc.MustLoadRef()
 
 	redeemedAssetData := slc.MustLoadRef()
@@ -149,6 +159,11 @@ func MustParseSupplyMessage(slc *cell.Slice, logVersion int) config.OnchainLog {
 	idxLog.SenderAddress = slc.MustLoadAddr().String()
 	idxLog.Utime = int64(slc.MustLoadUInt(32))
 
+	if slc.BitsLeft() == 16 {
+		idxLog.SubaccountID = int16(slc.MustLoadInt(16))
+	} else {
+		idxLog.SubaccountID = 0
+	}
 	attachedAssetData := slc.MustLoadRef()
 	idxLog.AttachedAssetAddress = config.BigInt{Int: attachedAssetData.MustLoadBigUInt(256)}
 	idxLog.AttachedAssetAmount = config.BigInt{Int: attachedAssetData.MustLoadBigUInt(64)}
