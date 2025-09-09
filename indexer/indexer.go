@@ -27,6 +27,7 @@ import (
 type FutureUpdate struct {
 	Address         string
 	ContractAddress string
+	SubaccountID    int16
 	CreatedAt       int64
 	Pool            config.Pool
 	TxUtime         int64
@@ -208,6 +209,7 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 			fut := FutureUpdate{
 				Address:         idxLog.UserAddress,
 				ContractAddress: idxLog.SenderAddress,
+				SubaccountID:    idxLog.SubaccountID,
 				CreatedAt:       time.Now().Unix(),
 				Pool:            pool,
 				TxUtime:         idxLog.Utime,
@@ -386,6 +388,7 @@ func makeUpdate(fut *FutureUpdate) {
 
 	userPrincipals := user.Principals()
 	onchainUser.Pool = fut.Pool.Name
+	onchainUser.SubaccountID = fut.SubaccountID
 	onchainUser.CodeVersion = int(user.CodeVersion())
 	onchainUser.ContractAddress = userContractAddress.String()
 	onchainUser.State = config.BigInt{Int: big.NewInt(user.UserState())}
