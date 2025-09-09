@@ -40,7 +40,7 @@ type MapKey struct {
 var (
 	updateMap   sync.Map
 	updateQueue               = make(chan FutureUpdate, 30000)
-	sleepTime   time.Duration = 30
+	sleepTime   time.Duration = 8
 	Shutdown                  = make(chan struct{})
 	WG          sync.WaitGroup
 )
@@ -322,7 +322,7 @@ func handleErrorAndRequeue(fut *FutureUpdate, reason string, err error) {
 	}
 }
 
-const updateDelayBufferSeconds int64 = 30
+const updateDelayBufferSeconds int64 = 8
 
 func makeUpdate(fut *FutureUpdate) {
 	//update := fut.CreatedAt
