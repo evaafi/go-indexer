@@ -41,12 +41,18 @@ type MapKey struct {
 var (
 	updateMap   sync.Map
 	updateQueue               = make(chan FutureUpdate, 30000)
-	sleepTime   time.Duration = 8
+	sleepTime   time.Duration = 17
 	Shutdown                  = make(chan struct{})
 	WG          sync.WaitGroup
 )
 
 const queueFile = "update_queue.json"
+
+// reindexInterval defines how often we re-enqueue all users for background refresh
+const reindexInterval = 3 * time.Hour
+
+// reindexEnqueueDelay throttles how fast we push users into the queue to avoid bursts
+const reindexEnqueueDelay = 50 * time.Second
 
 func SaveQueue() error {
 	var queueData []FutureUpdate
@@ -111,6 +117,9 @@ func RunIndexer(ctx context.Context, cfg config.Config) {
 		fmt.Printf("starting %s indexer \n", pool.Name)
 		go corutineIndexer(ctx, cfg, pool)
 	}
+
+	// start background reindex scheduler that gradually re-enqueues all users
+	go startReindexScheduler(ctx)
 }
 
 func corutineIndexer(ctx context.Context, cfg config.Config, pool config.Pool) {
@@ -324,7 +333,7 @@ func handleErrorAndRequeue(fut *FutureUpdate, reason string, err error) {
 	}
 }
 
-const updateDelayBufferSeconds int64 = 8
+const updateDelayBufferSeconds int64 = 17
 
 func makeUpdate(fut *FutureUpdate) {
 	//update := fut.CreatedAt
@@ -422,4 +431,86 @@ func makeUpdate(fut *FutureUpdate) {
 	if err := insertOrUpdate(db, onchainUser); err != nil {
 		fmt.Printf("error per insertOrUpdate  %s\n", err)
 	}
+}
+
+// getPoolByName returns pool config by name
+func getPoolByName(name string) (config.Pool, bool) {
+	for _, p := range config.Pools {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return config.Pool{}, false
+}
+
+// startReindexScheduler runs a periodic job which, on startup and every reindexInterval,
+// iterates through all users in the DB and gradually enqueues them for refresh via makeUpdate.
+func startReindexScheduler(ctx context.Context) {
+	// run once immediately on startup
+	go func() { enqueueAllUsersGradually(ctx) }()
+
+	ticker := time.NewTicker(reindexInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-Shutdown:
+			return
+		case <-ticker.C:
+			enqueueAllUsersGradually(ctx)
+		}
+	}
+}
+
+func enqueueAllUsersGradually(ctx context.Context) {
+	db, _ := config.GetDBInstance()
+
+	var users []config.OnchainUser
+	// Use batches to avoid loading everything at once
+	_ = db.Model(&config.OnchainUser{}).FindInBatches(&users, 500, func(tx *gorm.DB, batch int) error {
+		for i := range users {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("scheduler stopped")
+			case <-Shutdown:
+				return fmt.Errorf("scheduler stopped")
+			default:
+			}
+
+			u := users[i]
+			pool, ok := getPoolByName(u.Pool)
+			if !ok {
+				continue
+			}
+
+			key := MapKey{Address: u.WalletAddress, PoolName: pool.Name}
+			if _, exists := updateMap.Load(key); exists {
+				continue
+			}
+
+			fut := FutureUpdate{
+				Address:         u.WalletAddress,
+				ContractAddress: u.ContractAddress,
+				SubaccountID:    u.SubaccountID,
+				CreatedAt:       time.Now().Unix(),
+				Pool:            pool,
+				TxUtime:         u.UpdatedAt.Unix(),
+			}
+
+			updateMap.Store(key, fut)
+
+			select {
+			case updateQueue <- fut:
+			case <-ctx.Done():
+				return fmt.Errorf("scheduler stopped")
+			case <-Shutdown:
+				return fmt.Errorf("scheduler stopped")
+			}
+
+			time.Sleep(reindexEnqueueDelay)
+		}
+		return nil
+	})
 }
