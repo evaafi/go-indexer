@@ -430,6 +430,14 @@ func makeUpdate(fut *FutureUpdate) {
 
 	if err := insertOrUpdate(db, onchainUser); err != nil {
 		fmt.Printf("error per insertOrUpdate  %s\n", err)
+	} else {
+		fmt.Printf("user updated: wallet=%s pool=%s sub=%d contract=%s updated_at=%s\n",
+			onchainUser.WalletAddress,
+			onchainUser.Pool,
+			onchainUser.SubaccountID,
+			onchainUser.ContractAddress,
+			onchainUser.UpdatedAt.Format(time.RFC3339),
+		)
 	}
 }
 
