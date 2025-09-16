@@ -49,10 +49,10 @@ var (
 const queueFile = "update_queue.json"
 
 // reindexInterval defines how often we re-enqueue all users for background refresh
-const reindexInterval = 3 * time.Hour
+const reindexInterval = 4 * time.Hour
 
 // reindexEnqueueDelay throttles how fast we push users into the queue to avoid bursts
-const reindexEnqueueDelay = 50 * time.Second
+const reindexEnqueueDelay = 140 * time.Millisecond
 
 func SaveQueue() error {
 	var queueData []FutureUpdate
@@ -475,29 +475,56 @@ func startReindexScheduler(ctx context.Context) {
 func enqueueAllUsersGradually(ctx context.Context) {
 	db, _ := config.GetDBInstance()
 
-	var users []config.OnchainUser
-	// Use batches to avoid loading everything at once
-	_ = db.Model(&config.OnchainUser{}).FindInBatches(&users, 500, func(tx *gorm.DB, batch int) error {
-		for i := range users {
+	// Global priority across entire dataset: first users without any transactions,
+	// then users with the most recent activity.
+	type orderedUser struct {
+		WalletAddress   string    `gorm:"column:wallet_address"`
+		Pool            string    `gorm:"column:pool"`
+		SubaccountID    int16     `gorm:"column:subaccount_id"`
+		ContractAddress string    `gorm:"column:contract_address"`
+		UpdatedAt       time.Time `gorm:"column:updated_at"`
+		LastUtime       int64     `gorm:"column:last_utime"`
+	}
+
+	usersTable := config.GetTableName(db, &config.OnchainUser{})
+	logsTable := config.GetTableName(db, &config.OnchainLog{})
+	query := fmt.Sprintf(`
+SELECT u.wallet_address, u.pool, u.subaccount_id, u.contract_address, u.updated_at,
+       COALESCE(MAX(l.utime), 0) AS last_utime
+FROM %s u
+LEFT JOIN %s l
+  ON l.user_address = u.wallet_address AND l.pool = u.pool AND l.subaccount_id = u.subaccount_id
+GROUP BY u.wallet_address, u.pool, u.subaccount_id, u.contract_address, u.updated_at
+ORDER BY (COUNT(l.hash) = 0) DESC, MAX(l.utime) DESC, u.wallet_address ASC
+LIMIT ? OFFSET ?`, usersTable, logsTable)
+
+	batchSize := 500
+	for offset := 0; ; offset += batchSize {
+		var rows []orderedUser
+		if err := db.Raw(query, batchSize, offset).Scan(&rows).Error; err != nil {
+			fmt.Printf("scheduler query error: %v\n", err)
+			return
+		}
+		if len(rows) == 0 {
+			return
+		}
+		for _, u := range rows {
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("scheduler stopped")
+				return
 			case <-Shutdown:
-				return fmt.Errorf("scheduler stopped")
+				return
 			default:
 			}
 
-			u := users[i]
 			pool, ok := getPoolByName(u.Pool)
 			if !ok {
 				continue
 			}
-
 			key := MapKey{Address: u.WalletAddress, PoolName: pool.Name}
 			if _, exists := updateMap.Load(key); exists {
 				continue
 			}
-
 			fut := FutureUpdate{
 				Address:         u.WalletAddress,
 				ContractAddress: u.ContractAddress,
@@ -506,19 +533,20 @@ func enqueueAllUsersGradually(ctx context.Context) {
 				Pool:            pool,
 				TxUtime:         u.UpdatedAt.Unix(),
 			}
-
 			updateMap.Store(key, fut)
-
 			select {
 			case updateQueue <- fut:
+				if u.LastUtime == 0 {
+					fmt.Printf("enqueue user: wallet=%s pool=%s sub=%d priority=no_tx last_activity=-\n", u.WalletAddress, pool.Name, u.SubaccountID)
+				} else {
+					fmt.Printf("enqueue user: wallet=%s pool=%s sub=%d priority=recent last_activity=%s\n", u.WalletAddress, pool.Name, u.SubaccountID, time.Unix(u.LastUtime, 0).Format(time.RFC3339))
+				}
 			case <-ctx.Done():
-				return fmt.Errorf("scheduler stopped")
+				return
 			case <-Shutdown:
-				return fmt.Errorf("scheduler stopped")
+				return
 			}
-
 			time.Sleep(reindexEnqueueDelay)
 		}
-		return nil
-	})
+	}
 }
