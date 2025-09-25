@@ -20,7 +20,7 @@ const (
 	MessageSubTypeRepay    string = "repay"
 
 	LogOpCodeSupplySuccess    uint64 = 0x1
-	LogOpCodeWithdrawSuccess  uint64 = 0x2
+	LogOpCodeWithdrawSuccess  uint64 = 0x16
 	LogOpCodeLiquidateSuccess uint64 = 0x3
 )
 
@@ -133,8 +133,17 @@ func MustParseWithdrawMessage(slc *cell.Slice, logVersion int) config.OnchainLog
 	}
 
 	idxLog.Utime = int64(slc.MustLoadUInt(32))
-	if slc.BitsLeft() == 16 {
+	if slc.BitsLeft() == 16 {  // new version of withdraw log
 		idxLog.SubaccountID = int16(slc.MustLoadInt(16))
+
+		attachedAssetData := slc.MustLoadRef()
+		idxLog.AttachedAssetAddress = config.BigInt{Int: attachedAssetData.MustLoadBigUInt(256)}
+		idxLog.AttachedAssetAmount = config.BigInt{Int: attachedAssetData.MustLoadBigUInt(64)}
+		idxLog.AttachedAssetPrincipal = config.BigInt{Int: big.NewInt(attachedAssetData.MustLoadInt(64))}
+		idxLog.AttachedAssetTotalSupplyPrincipal = config.BigInt{Int: big.NewInt(attachedAssetData.MustLoadInt(64))}
+		idxLog.AttachedAssetTotalBorrowPrincipal = config.BigInt{Int: big.NewInt(attachedAssetData.MustLoadInt(64))}
+		idxLog.AttachedAssetSRate = config.BigInt{Int: attachedAssetData.MustLoadBigUInt(64)}
+		idxLog.AttachedAssetBRate = config.BigInt{Int: attachedAssetData.MustLoadBigUInt(64)}
 	} else {
 		idxLog.SubaccountID = 0
 		slc.MustLoadRef()
