@@ -293,19 +293,20 @@ func buildPrincipals(raw map[string]*big.Int, poolConfig *sdkConfig.Config) conf
 	return out
 }
 
-// upsertOnchainUser performs INSERT ... ON CONFLICT DO UPDATE on the full PK
-// (wallet_address, pool, subaccount_id, contract_address). created_at is
-// intentionally absent from the update set so historical first-seen times stay.
+// upsertOnchainUser performs INSERT ... ON CONFLICT DO UPDATE matching the
+// existing prod PK (wallet_address, pool, contract_address). created_at is
+// intentionally absent from the update set so historical first-seen times
+// stay; subaccount_id IS in the update set so a row created with sub=0 by
+// older code gets corrected the first time we see real subaccount info.
 func upsertOnchainUser(db *gorm.DB, u config.OnchainUser) error {
 	return db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "wallet_address"},
 			{Name: "pool"},
-			{Name: "subaccount_id"},
 			{Name: "contract_address"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"code_version", "updated_at", "state", "principals",
+			"code_version", "updated_at", "state", "principals", "subaccount_id",
 		}),
 	}).Create(&u).Error
 }

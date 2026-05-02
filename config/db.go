@@ -109,11 +109,16 @@ func (b *BigInt) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// OnchainUser — primary key matches the prod schema:
+// PK = (wallet_address, pool, contract_address). subaccount_id is a regular
+// column (NOT NULL DEFAULT 0); since contract_address is deterministically
+// derived from (wallet, pool, sub), the 3-col PK is functionally equivalent
+// to a 4-col one and no two subaccounts of the same wallet share a row.
 type OnchainUser struct {
 	WalletAddress   string     `gorm:"primaryKey;column:wallet_address"`
 	Pool            string     `gorm:"primaryKey;column:pool"`
-	SubaccountID    int16      `gorm:"primaryKey;column:subaccount_id;default:0"`
 	ContractAddress string     `gorm:"primaryKey;unique;column:contract_address;not null"`
+	SubaccountID    int16      `gorm:"column:subaccount_id;not null;default:0"`
 	CodeVersion     int        `gorm:"column:code_version;not null"`
 	CreatedAt       time.Time  `gorm:"column:created_at;not null"`
 	UpdatedAt       time.Time  `gorm:"column:updated_at;not null"`
