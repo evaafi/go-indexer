@@ -31,8 +31,7 @@ type Pool struct {
 }*/
 
 var (
-	UtimeAddendum int64 = 60 * 60 * 24 * 31
-	PoolMain            = Pool{
+	PoolMain = Pool{
 		Name:    "main",
 		Address: "EQC8rUZqR_pWV1BylWUlPNBzyiTYVoBEmQkMIQDZXICfnuRr",
 	}
@@ -95,7 +94,6 @@ type Config struct {
 	DBUser                  string  `yaml:"dbUser"`
 	DBPass                  string  `yaml:"dbPass"`
 	DBName                  string  `yaml:"dbName"`
-	GraphQLEndpoint         string  `yaml:"graphqlEndpoint"`
 	UserSyncWorkers         int     `yaml:"userSyncWorkers"`
 	ForceResyncOnEveryStart bool    `yaml:"forceResyncOnEveryStart"`
 	MigrateOnStart          bool    `yaml:"migrateOnStart"`

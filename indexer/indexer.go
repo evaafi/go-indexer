@@ -4,16 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
-	"reflect"
+	"os"
 	"strings"
-
-	//"os"
 	"sync"
 	"time"
-
-	"os"
 
 	sdkConfig "github.com/evaafi/evaa-go-sdk/config"
 	sdkPrincipal "github.com/evaafi/evaa-go-sdk/principal"
@@ -31,28 +28,66 @@ type FutureUpdate struct {
 	CreatedAt       int64
 	Pool            config.Pool
 	TxUtime         int64
+	// IsRecheck is set on the one-shot follow-up enqueue we schedule after a
+	// fresh tx whose post-fetch state matched what was already in DB (likely
+	// TonCenter hadn't indexed the new state yet). Limits the recursion to
+	// exactly one extra attempt — see scheduleRecheck.
+	IsRecheck bool
 }
 
 type MapKey struct {
-	Address  string
-	PoolName string
+	Address      string
+	PoolName     string
+	SubaccountID int16
 }
 
+// Two-tier work queue.
+//
+//   - freshQueue:   FutureUpdates produced by indexer-tx events. Workers always
+//     drain this first.
+//   - reindexQueue: FutureUpdates produced by background sweeps and retries.
+//     Workers only pull from this queue when freshQueue is empty.
+//
+// updateMap dedupes by (wallet, pool, sub) and stores the LATEST FutureUpdate
+// known for that key. A fresh-tx producer overwrites the map and pushes to
+// freshQueue regardless of whether a reindex entry was already queued; the
+// stale reindex entry becomes a "ghost" that the worker filters out via
+// processOrSkip (compares the popped value to map's current value — if they
+// don't match, skip).
 var (
-	updateMap   sync.Map
-	updateQueue               = make(chan FutureUpdate, 30000)
-	sleepTime   time.Duration = 17
-	Shutdown                  = make(chan struct{})
-	WG          sync.WaitGroup
+	updateMap    sync.Map
+	freshQueue                 = make(chan FutureUpdate, 5000)
+	reindexQueue               = make(chan FutureUpdate, 30000)
+	sleepTime    time.Duration = 4
+	Shutdown                   = make(chan struct{})
+	WG           sync.WaitGroup
 )
 
-const queueFile = "update_queue.json"
+const (
+	queueFile = "update_queue.json"
+	// updateDelayBufferSeconds: skip the finalization wait if the tx happened
+	// more than this long ago. Should equal sleepTime — together they say "if
+	// tx is fresher than 4s, sleep until it has had 4s to finalize".
+	updateDelayBufferSeconds int64 = 4
+	// reindexInterval: how often we sweep all known users for state refresh.
+	// Lowered from 4h → 2h now that fresh tx events run on a separate
+	// priority queue and can't be starved by reindex bursts.
+	reindexInterval = 2 * time.Hour
+	// reindexEnqueueDelay: throttle between sweep enqueues so reindex doesn't
+	// fire a "lavina" of 10000 entries at once and saturate the TonCenter
+	// rate budget. At 250ms we cap reindex at 4 enqueues/sec, leaving the
+	// rest of the limiter budget for fresh tx events.
+	reindexEnqueueDelay = 250 * time.Millisecond
+	// recheckDelay: after a fresh tx's first apply found no change vs the
+	// existing DB row (likely TonCenter still serving stale state), wait this
+	// long and try once more. Capped at one retry by FutureUpdate.IsRecheck.
+	recheckDelay        = 4 * time.Second
+	logsInsertBatchSize = 1000
+)
 
-// reindexInterval defines how often we re-enqueue all users for background refresh
-const reindexInterval = 4 * time.Hour
-
-// reindexEnqueueDelay throttles how fast we push users into the queue to avoid bursts
-const reindexEnqueueDelay = 140 * time.Millisecond
+func mapKeyOf(fut *FutureUpdate) MapKey {
+	return MapKey{Address: fut.Address, PoolName: fut.Pool.Name, SubaccountID: fut.SubaccountID}
+}
 
 func SaveQueue() error {
 	var queueData []FutureUpdate
@@ -67,8 +102,7 @@ func SaveQueue() error {
 		return fmt.Errorf("error encoding JSON: %w", err)
 	}
 
-	err = os.WriteFile(queueFile, data, 0644)
-	if err != nil {
+	if err := os.WriteFile(queueFile, data, 0644); err != nil {
 		return fmt.Errorf("error writing to file: %w", err)
 	}
 
@@ -88,15 +122,15 @@ func LoadQueue() error {
 	}
 
 	var queueData []FutureUpdate
-
-	err = json.Unmarshal(data, &queueData)
-	if err != nil {
+	if err := json.Unmarshal(data, &queueData); err != nil {
 		return fmt.Errorf("error decoding JSON: %w", err)
 	}
 
+	// Saved entries are stale by definition — restore them at low priority so
+	// they don't block fresh tx events from being picked up first.
 	for _, fut := range queueData {
-		updateMap.Store(MapKey{Address: fut.Address, PoolName: fut.Pool.Name}, fut)
-		updateQueue <- fut
+		updateMap.Store(mapKeyOf(&fut), fut)
+		reindexQueue <- fut
 	}
 
 	fmt.Printf("Loaded %d elements into the queue\n", len(queueData))
@@ -109,8 +143,9 @@ func RunIndexer(ctx context.Context, cfg config.Config) {
 	}
 
 	for i := 0; i < cfg.UserSyncWorkers; i++ {
+		fmt.Printf("starting user state worker %d/%d\n", i+1, cfg.UserSyncWorkers)
 		WG.Add(1)
-		go worker(updateQueue, &WG)
+		go worker(ctx, &WG)
 	}
 
 	for _, pool := range config.Pools {
@@ -118,102 +153,245 @@ func RunIndexer(ctx context.Context, cfg config.Config) {
 		go corutineIndexer(ctx, cfg, pool)
 	}
 
-	// start background reindex scheduler that gradually re-enqueues all users
 	go startReindexScheduler(ctx)
 }
+
+// resolveSDKConfig returns the SDK config + principal service for a pool. Both
+// can be nil if the pool name is unknown.
+func resolveSDKConfig(poolName string) (*sdkConfig.Config, *sdkPrincipal.Service) {
+	switch poolName {
+	case "main":
+		c := sdkConfig.GetMainMainnetConfig()
+		return c, sdkPrincipal.NewService(c)
+	case "lp":
+		c := sdkConfig.GetLpMainnetConfig()
+		return c, sdkPrincipal.NewService(c)
+	case "alts":
+		c := sdkConfig.GetAltsMainnetConfig()
+		return c, sdkPrincipal.NewService(c)
+	case "stable":
+		c := sdkConfig.GetStableMainnetConfig()
+		return c, sdkPrincipal.NewService(c)
+	}
+	return nil, nil
+}
+
+// applyUserStateBoc decodes a base64 BOC of the user-SC storage data and
+// upserts the corresponding OnchainUser row. Returns changed=true if the
+// freshly parsed state differs from what was already in DB (or the row is new),
+// changed=false if the parsed state semantically matches the existing row —
+// caller can use this signal to schedule a single recheck after a fresh tx, in
+// case TonCenter served stale state.
+//
+// txUtime is used as updated_at; created_at is preserved by the ON CONFLICT
+// clause.
+func applyUserStateBoc(pool config.Pool, walletAddress, contractAddress string, subaccountID int16, dataBocBase64 string, txUtime int64) (bool, error) {
+	db, _ := config.GetDBInstance()
+
+	decoded, err := base64.StdEncoding.DecodeString(dataBocBase64)
+	if err != nil {
+		return false, fmt.Errorf("decode base64 user state: %w", err)
+	}
+	dataCell, err := cell.FromBOC(decoded)
+	if err != nil {
+		return false, fmt.Errorf("parse user state BOC: %w", err)
+	}
+
+	sdkPoolConfig, service := resolveSDKConfig(pool.Name)
+	if sdkPoolConfig == nil {
+		return false, fmt.Errorf("unknown pool: %s", pool.Name)
+	}
+
+	if contractAddress == "" {
+		userContractAddress, _ := service.CalculateUserSCAddress(address.MustParseAddr(walletAddress))
+		contractAddress = userContractAddress.String()
+	}
+
+	userSC := sdkPrincipal.NewUserSC(address.MustParseAddr(contractAddress))
+	if _, err := userSC.SetAccData(dataCell); err != nil {
+		return false, fmt.Errorf("set acc data: %w", err)
+	}
+
+	updatedAt := time.Unix(txUtime, 0)
+	user := config.OnchainUser{
+		WalletAddress:   walletAddress,
+		Pool:            pool.Name,
+		SubaccountID:    subaccountID,
+		ContractAddress: contractAddress,
+		CodeVersion:     int(userSC.CodeVersion()),
+		CreatedAt:       updatedAt, // only used on insert; ON CONFLICT skips it on update
+		UpdatedAt:       updatedAt,
+		State:           config.BigInt{Int: big.NewInt(userSC.UserState())},
+		Principals:      buildPrincipals(userSC.Principals(), sdkPoolConfig),
+	}
+
+	// Snapshot the current row (if any) before upsert so we can tell if our
+	// fetch produced anything new.
+	var prev config.OnchainUser
+	prevErr := db.Where("wallet_address = ? AND pool = ? AND subaccount_id = ? AND contract_address = ?",
+		walletAddress, pool.Name, subaccountID, contractAddress).First(&prev).Error
+	isNew := errors.Is(prevErr, gorm.ErrRecordNotFound)
+	if prevErr != nil && !isNew {
+		return false, fmt.Errorf("read previous user row: %w", prevErr)
+	}
+
+	if err := upsertOnchainUser(db, user); err != nil {
+		return false, err
+	}
+	if isNew {
+		return true, nil
+	}
+	return !sameUserState(prev, user), nil
+}
+
+// sameUserState compares the fields that change when a user actually does
+// something on-chain (state code, principals, code version). Created/updated
+// timestamps are ignored — they always change on each upsert and aren't a
+// signal of real on-chain change.
+func sameUserState(a, b config.OnchainUser) bool {
+	if a.CodeVersion != b.CodeVersion {
+		return false
+	}
+	if cmpBigInt(a.State, b.State) != 0 {
+		return false
+	}
+	if len(a.Principals) != len(b.Principals) {
+		return false
+	}
+	for k, av := range a.Principals {
+		bv, ok := b.Principals[k]
+		if !ok || cmpBigInt(av, bv) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// cmpBigInt compares two BigInt wrappers, treating nil .Int as zero so we
+// don't blow up on partially-loaded rows.
+func cmpBigInt(a, b config.BigInt) int {
+	ai := a.Int
+	bi := b.Int
+	if ai == nil {
+		ai = big.NewInt(0)
+	}
+	if bi == nil {
+		bi = big.NewInt(0)
+	}
+	return ai.Cmp(bi)
+}
+
+func buildPrincipals(raw map[string]*big.Int, poolConfig *sdkConfig.Config) config.Principals {
+	out := make(config.Principals, len(poolConfig.Assets))
+	for _, asset := range poolConfig.Assets {
+		v := big.NewInt(0)
+		if r, ok := raw[asset.ID.String()]; ok && r != nil {
+			v = new(big.Int).Set(r)
+		}
+		out[config.BigInt{Int: new(big.Int).Set(asset.ID)}] = config.BigInt{Int: v}
+	}
+	return out
+}
+
+// upsertOnchainUser performs INSERT ... ON CONFLICT DO UPDATE on the full PK
+// (wallet_address, pool, subaccount_id, contract_address). created_at is
+// intentionally absent from the update set so historical first-seen times stay.
+func upsertOnchainUser(db *gorm.DB, u config.OnchainUser) error {
+	return db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "wallet_address"},
+			{Name: "pool"},
+			{Name: "subaccount_id"},
+			{Name: "contract_address"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"code_version", "updated_at", "state", "principals",
+		}),
+	}).Create(&u).Error
+}
+
+// Stable poll cadence: every 500ms regardless of whether the last cycle
+// returned anything. Predictable rate budget, predictable worst-case latency
+// on the indexer side (~250ms average, ~500ms tail).
+const cycleSleep = 500 * time.Millisecond
 
 func corutineIndexer(ctx context.Context, cfg config.Config, pool config.Pool) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-Shutdown:
+			return
 		default:
 		}
 
-		wait, err := processIndex(cfg, pool)
-
-		if err != nil {
-			fmt.Println(err)
+		if err := processIndex(ctx, cfg, pool); err != nil {
+			fmt.Printf("indexer %s: %v\n", pool.Name, err)
 		}
 
-		if wait {
-			time.Sleep(10 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-Shutdown:
+			return
+		case <-time.After(cycleSleep):
 		}
-
-		time.Sleep(1 * time.Second)
 	}
-
 }
 
-func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
-	var db, _ = config.GetDBInstance()
+func processIndex(ctx context.Context, cfg config.Config, pool config.Pool) error {
+	db, _ := config.GetDBInstance()
 
 	var state config.OnchainSyncState
-	poolValue := pool.Name
-
-	if err := db.Where("pool = ?", poolValue).First(&state).Error; err != nil {
-		return false, fmt.Errorf("error per getting poolValue")
+	if err := db.Where("pool = ?", pool.Name).First(&state).Error; err != nil {
+		return fmt.Errorf("get sync state for pool %s: %w", pool.Name, err)
 	}
-	lastUtime := state.LastUtime
-	//fmt.Printf("pool %s: current utime %d\n", lastUtime);
+
 	pageSize := cfg.MaxPageSize
-	transactions, lastUtime, err := ProcessTransactions(cfg.GraphQLEndpoint, pool.Address, lastUtime, pageSize)
+	if pageSize <= 0 {
+		pageSize = 1000
+	}
 
+	transactions, lastUtime, lastLt, err := ProcessTransactions(ctx, pool.Address, state.LastUtime, state.LastLt, pageSize)
 	if err != nil {
-		return false, fmt.Errorf("error per processing transactions %s %d", pool.Name, lastUtime)
+		return fmt.Errorf("fetch transactions for %s from utime=%d lt=%d: %w", pool.Name, state.LastUtime, state.LastLt, err)
 	}
 
-	if len(transactions) == 0 && time.Now().Unix() > lastUtime+config.UtimeAddendum {
-		lastUtime += config.UtimeAddendum
-		if err := db.Save(&state).Error; err != nil {
-			return false, fmt.Errorf("error updating IdxSyncState: %w", err)
-		}
-
-		return true, nil
-	}
-
+	// Empty just means caught up; the LT cursor is exact so we don't have to
+	// advance manually. Outer loop will sleep its usual cycle and retry.
 	if len(transactions) == 0 {
-		return true, nil
+		return nil
 	}
 
-	fmt.Printf("indexer %s got %d new transactions \n", pool.Name, len(transactions))
+	fmt.Printf("indexer %s got %d new messages (lt %d -> %d)\n", pool.Name, len(transactions), state.LastLt, lastLt)
 
-	state.LastUtime = min(lastUtime, state.LastUtime+config.UtimeAddendum)
+	state.LastUtime = lastUtime
+	state.LastLt = lastLt
 	if err := db.Save(&state).Error; err != nil {
-		return false, fmt.Errorf("error updating IdxSyncState: %w", err)
+		return fmt.Errorf("save sync state for %s: %w", pool.Name, err)
 	}
 
-	var logs []config.OnchainLog
-
+	logs := make([]config.OnchainLog, 0, len(transactions))
 	for _, tr := range transactions {
 		logVersion := 1
-
 		if pool.Name == "lp" && tr.LT < 49712577000001 || pool.Name == "main" && tr.LT < 49828980000001 {
 			logVersion = 0
 		}
 
 		for _, body := range tr.OutMsgBodies {
 			idxLog, err := ParseLogMessage(body, logVersion)
-
-			idxLog.Pool = pool.Name
-			idxLog.CreatedAt = time.Unix(idxLog.Utime, 0)
-			idxLog.Hash = tr.Hash
-
 			if err != nil {
 				if strings.Contains(err.Error(), "unknown log type") {
 					continue
 				}
-				fmt.Printf("cannot parse log message hash: %s %s \n", tr.Hash, err)
+				fmt.Printf("indexer %s: parse log hash=%s: %v\n", pool.Name, tr.Hash, err)
 				continue
 			}
 
+			idxLog.Pool = pool.Name
+			idxLog.CreatedAt = time.Unix(idxLog.Utime, 0)
+			idxLog.Hash = tr.Hash
 			logs = append(logs, idxLog)
-
-			key := MapKey{Address: idxLog.UserAddress, PoolName: pool.Name}
-
-			if _, ok := updateMap.Load(key); ok {
-				continue
-			}
 
 			fut := FutureUpdate{
 				Address:         idxLog.UserAddress,
@@ -223,225 +401,203 @@ func processIndex(cfg config.Config, pool config.Pool) (bool, error) {
 				Pool:            pool,
 				TxUtime:         idxLog.Utime,
 			}
-			updateMap.Store(key, fut)
-			updateQueue <- fut
-
+			// Always Store-overwrite for fresh: if a stale reindex entry was in
+			// the map, we replace it so the previously queued reindex item
+			// becomes a ghost (skipped in processOrSkip), while this fresh
+			// entry rides the high-priority freshQueue.
+			updateMap.Store(mapKeyOf(&fut), fut)
+			select {
+			case freshQueue <- fut:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 
-	//fmt.Printf("%s pool start inserting\n", pool.Name)
-
-	batchSize := 1000
-
-	for i := 0; i < len(logs); i += batchSize {
-		end := i + batchSize
+	for i := 0; i < len(logs); i += logsInsertBatchSize {
+		end := i + logsInsertBatchSize
 		if end > len(logs) {
 			end = len(logs)
 		}
-
-		batch := logs[i:end]
-
-		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&batch).Error; err != nil {
-			return false, fmt.Errorf("error inserting records: %w", err)
+		if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(logs[i:end]).Error; err != nil {
+			return fmt.Errorf("insert logs for %s: %w", pool.Name, err)
 		}
 	}
 
-	fmt.Printf("%s pool inserted\n", pool.Name)
-
-	return len(transactions) >= pageSize, nil
+	return nil
 }
 
-func insertOrUpdate[T config.UserInterface](db *gorm.DB, data T) error {
-	/*result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "wallet_address"}},
-		DoUpdates: clause.AssignmentColumns(getUpdatableFields[T](db)),
-	}).Create(&data)
-
-	return result.Error*/
-	objType := reflect.TypeOf(data)
-	if objType.Kind() != reflect.Struct {
-		return fmt.Errorf("insertOrUpdate: T must be a struct, got %T", data)
-	}
-
-	updatableFields := getUpdatableFields[T](db)
-
-	result := db.Model(&data).
-		Where("wallet_address = ?", data.GetWalletAddress()).
-		Select(updatableFields).
-		Updates(data)
-
-	if result.RowsAffected == 0 {
-		return db.Create(&data).Error
-	}
-
-	return result.Error
-}
-
-func getUpdatableFields[T any](db *gorm.DB) []string {
-	obj := new(T)
-	objType := reflect.TypeOf(obj).Elem()
-
-	if objType.Kind() != reflect.Struct {
-		panic("getUpdatableFields: T must be a struct")
-	}
-
-	if objType.Kind() != reflect.Struct {
-		panic(fmt.Sprintf("getUpdatableFields: %T is not a struct", obj))
-	}
-
-	fields := []string{}
-	stmt := db.Model(obj).Statement
-	stmt.Parse(obj)
-
-	if stmt.Schema == nil {
-		panic("getUpdatableFields: Schema is nil, check if model is registered in GORM")
-	}
-
-	for _, field := range stmt.Schema.Fields {
-		if field.DBName != "created_at" {
-			fields = append(fields, field.DBName)
-		}
-	}
-	return fields
-}
-
-func worker(updateQueue <-chan FutureUpdate, wg *sync.WaitGroup) {
+// worker reads work units with prefer-fresh priority: it always tries to pop
+// from freshQueue first (non-blocking), falling back to a blocking select on
+// both queues when fresh is empty. Each popped entry passes through
+// processOrSkip so that ghost entries (queued by reindex but later superseded
+// by a fresh tx for the same user) are dropped without doing a TonCenter call.
+func worker(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
+		// 1. Try fresh first, non-blocking. This makes prefer-fresh strict:
+		//    if both queues have items ready, fresh always wins.
 		select {
-		case <-Shutdown:
-			fmt.Println("Worker received shutdown signal, finishing current task...")
+		case <-ctx.Done():
 			return
-		case fut := <-updateQueue:
-			makeUpdate(&fut)
+		case <-Shutdown:
+			return
+		case fut := <-freshQueue:
+			processOrSkip(ctx, &fut)
+			continue
+		default:
+		}
+
+		// 2. Both empty — block on either, plus shutdown signals.
+		select {
+		case <-ctx.Done():
+			return
+		case <-Shutdown:
+			return
+		case fut := <-freshQueue:
+			processOrSkip(ctx, &fut)
+		case fut := <-reindexQueue:
+			processOrSkip(ctx, &fut)
 		}
 	}
 }
 
-func handleErrorAndRequeue(fut *FutureUpdate, reason string, err error) {
+// processOrSkip drops the popped entry if it's a ghost — i.e. the dedup map
+// either no longer holds an entry for this key (already processed) or holds a
+// different value (a fresher producer overwrote us). This is what lets a fresh
+// tx producer overwrite a stale reindex entry without leaving duplicate work.
+func processOrSkip(ctx context.Context, fut *FutureUpdate) {
+	v, ok := updateMap.Load(mapKeyOf(fut))
+	if !ok {
+		return
+	}
+	if v.(FutureUpdate) != *fut {
+		return
+	}
+	makeUpdate(ctx, fut)
+}
+
+// handleErrorAndRequeue logs the failure and pushes the future update back
+// onto the LOW-priority reindex queue. Retries are deliberately deprioritized
+// so a flaky user contract can't starve fresh tx events. If a new fresh tx
+// arrives for the same user while the retry sits in reindexQueue, the fresh
+// producer will Store-overwrite the map entry, the queued retry will be
+// detected as a ghost by processOrSkip, and the fresh entry will run instead.
+func handleErrorAndRequeue(ctx context.Context, fut *FutureUpdate, reason string, err error) {
 	if err != nil {
 		fmt.Printf("%s: %v\n", reason, err)
 	} else {
 		fmt.Println(reason)
 	}
 
-	if fut != nil {
-		key := MapKey{Address: fut.Address, PoolName: fut.Pool.Name}
+	if fut == nil {
+		return
+	}
 
-		updateMap.Store(key, fut)
-		updateQueue <- *fut
+	select {
+	case reindexQueue <- *fut:
+	case <-ctx.Done():
+	case <-Shutdown:
 	}
 }
 
-const updateDelayBufferSeconds int64 = 17
-
-func makeUpdate(fut *FutureUpdate) {
-	//update := fut.CreatedAt
+func makeUpdate(ctx context.Context, fut *FutureUpdate) {
 	if fut.TxUtime > time.Now().Unix()-updateDelayBufferSeconds {
-		time.Sleep(sleepTime * time.Second)
-	}
-
-	key := MapKey{Address: fut.Address, PoolName: fut.Pool.Name}
-	defer updateMap.Delete(key)
-
-	db, _ := config.GetDBInstance()
-
-	var userContractAddress = address.MustParseAddr(fut.ContractAddress)
-	var sdkPoolConfig *sdkConfig.Config
-
-	if fut.Pool.Name == "main" {
-		sdkPoolConfig = sdkConfig.GetMainMainnetConfig()
-	} else if fut.Pool.Name == "lp" {
-		sdkPoolConfig = sdkConfig.GetLpMainnetConfig()
-	} else if fut.Pool.Name == "alts" {
-		sdkPoolConfig = sdkConfig.GetAltsMainnetConfig()
-	} else if fut.Pool.Name == "stable" {
-		sdkPoolConfig = sdkConfig.GetStableMainnetConfig()
-	}
-	//userContractAddress, _ = service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
-
-	rawState, err := GetRawState(config.CFG.GraphQLEndpoint, userContractAddress.String())
-
-	if err != nil {
-		handleErrorAndRequeue(fut, "failed to get user state", err)
-		return
-	}
-
-	var userStateResponse GraphQLStatesResponse
-	if err := json.Unmarshal([]byte(rawState), &userStateResponse); err != nil {
-		handleErrorAndRequeue(fut, fmt.Sprintf("failed to unmarshal user state %s", rawState), err)
-		return
-	}
-
-	if len(userStateResponse.Data.RawAccountStates) == 0 {
-		handleErrorAndRequeue(fut, fmt.Sprintf("cannot get user state: %s %s %s %s, %s; adding again to queue", fut.Address, userContractAddress.String(), fut.Pool, rawState, userStateResponse.Data), nil)
-		return
-	}
-
-	dataBoc, err := base64.StdEncoding.DecodeString(userStateResponse.Data.RawAccountStates[0].State)
-	if err != nil {
-		handleErrorAndRequeue(fut, fmt.Sprintf("failed to decode base64 user state: %s %s", userStateResponse.Data.RawAccountStates[0].State, userContractAddress.String()), err)
-		return
-	}
-
-	data, err := cell.FromBOC(dataBoc)
-	if err != nil {
-		handleErrorAndRequeue(fut, fmt.Sprintf("failed to create boc from base64 user state: %s", userContractAddress.String()), err)
-		return
-	}
-
-	user := sdkPrincipal.NewUserSC(userContractAddress)
-	_, _ = user.SetAccData(data)
-
-	onchainUser := config.OnchainUser{}
-
-	userPrincipals := user.Principals()
-	onchainUser.Pool = fut.Pool.Name
-	onchainUser.SubaccountID = fut.SubaccountID
-	onchainUser.CodeVersion = int(user.CodeVersion())
-	onchainUser.ContractAddress = userContractAddress.String()
-	onchainUser.State = config.BigInt{Int: big.NewInt(user.UserState())}
-	if fut.CreatedAt > (fut.TxUtime + updateDelayBufferSeconds) {
-		onchainUser.UpdatedAt = time.Unix(fut.CreatedAt, 0)
-	} else {
-		onchainUser.UpdatedAt = time.Unix(fut.TxUtime, 0)
-	}
-	onchainUser.CreatedAt = time.Unix(fut.TxUtime, 0)
-	onchainUser.WalletAddress = fut.Address
-
-	principalsByID := make(map[string]*big.Int)
-	for name, raw := range userPrincipals {
-		if raw == nil {
-			raw = big.NewInt(0)
+		select {
+		case <-time.After(sleepTime * time.Second):
+		case <-ctx.Done():
+			return
+		case <-Shutdown:
+			return
 		}
-		principalsByID[name] = raw
 	}
-	normalizedPrincipals := make(config.Principals)
-	for _, asset := range sdkPoolConfig.Assets {
-		idStr := asset.ID.String()
-		value := big.NewInt(0)
-		if v, ok := principalsByID[idStr]; ok && v != nil {
-			value = new(big.Int).Set(v)
-		}
-		key := config.BigInt{Int: new(big.Int).Set(asset.ID)}
-		normalizedPrincipals[key] = config.BigInt{Int: value}
-	}
-	onchainUser.Principals = normalizedPrincipals
 
-	if err := insertOrUpdate(db, onchainUser); err != nil {
-		fmt.Printf("error per insertOrUpdate  %s\n", err)
-	} else {
-		fmt.Printf("user updated: wallet=%s pool=%s sub=%d contract=%s updated_at=%s\n",
-			onchainUser.WalletAddress,
-			onchainUser.Pool,
-			onchainUser.SubaccountID,
-			onchainUser.ContractAddress,
-			onchainUser.UpdatedAt.Format(time.RFC3339),
-		)
+	key := mapKeyOf(fut)
+
+	if fut.ContractAddress == "" {
+		_, service := resolveSDKConfig(fut.Pool.Name)
+		if service == nil {
+			updateMap.Delete(key)
+			fmt.Printf("makeUpdate: unknown pool %s\n", fut.Pool.Name)
+			return
+		}
+		addr, _ := service.CalculateUserSCAddress(address.MustParseAddr(fut.Address))
+		fut.ContractAddress = addr.String()
+	}
+
+	dataBocBase64, err := GetAccountStateToncenter(ctx, fut.ContractAddress)
+	if err != nil {
+		// Keep dedup; requeue.
+		handleErrorAndRequeue(ctx, fut, fmt.Sprintf("toncenter state %s", fut.ContractAddress), err)
+		return
+	}
+	if dataBocBase64 == "" {
+		// Empty state means the user contract is uninit. Drop dedup so future
+		// txs can re-enqueue it.
+		updateMap.Delete(key)
+		fmt.Printf("toncenter empty state for %s (pool %s)\n", fut.ContractAddress, fut.Pool.Name)
+		return
+	}
+
+	ts := fut.TxUtime
+	if fut.CreatedAt > fut.TxUtime+updateDelayBufferSeconds {
+		ts = fut.CreatedAt
+	}
+
+	changed, err := applyUserStateBoc(fut.Pool, fut.Address, fut.ContractAddress, fut.SubaccountID, dataBocBase64, ts)
+	if err != nil {
+		handleErrorAndRequeue(ctx, fut, fmt.Sprintf("apply user state %s", fut.ContractAddress), err)
+		return
+	}
+
+	updateMap.Delete(key)
+	fmt.Printf("user updated wallet=%s pool=%s sub=%d contract=%s ts=%s changed=%v recheck=%v\n",
+		fut.Address, fut.Pool.Name, fut.SubaccountID, fut.ContractAddress,
+		time.Unix(ts, 0).Format(time.RFC3339), changed, fut.IsRecheck)
+
+	// If a fresh tx didn't visibly change anything in DB, TonCenter probably
+	// hadn't indexed the new state yet — schedule one delayed retry. The
+	// IsRecheck guard caps this at exactly one extra attempt; if it still
+	// shows nothing changed, we let the next 2-hour reindex pick it up.
+	if !changed && !fut.IsRecheck {
+		scheduleRecheck(ctx, fut)
 	}
 }
 
-// getPoolByName returns pool config by name
+// scheduleRecheck waits recheckDelay and re-enqueues the same FutureUpdate
+// with IsRecheck=true onto the fresh queue. If, while we were sleeping, a
+// newer fresh tx for the same user arrived (i.e. updateMap already has an
+// entry for the key), we skip — that fresh path will fetch the latest state
+// itself, our recheck is redundant.
+func scheduleRecheck(ctx context.Context, src *FutureUpdate) {
+	recheck := *src
+	recheck.IsRecheck = true
+	recheck.CreatedAt = time.Now().Unix()
+
+	go func() {
+		select {
+		case <-time.After(recheckDelay):
+		case <-ctx.Done():
+			return
+		case <-Shutdown:
+			return
+		}
+
+		key := mapKeyOf(&recheck)
+		if _, loaded := updateMap.LoadOrStore(key, recheck); loaded {
+			return
+		}
+		select {
+		case freshQueue <- recheck:
+		case <-ctx.Done():
+			updateMap.Delete(key)
+		case <-Shutdown:
+			updateMap.Delete(key)
+		}
+	}()
+}
+
+// getPoolByName returns pool config by name.
 func getPoolByName(name string) (config.Pool, bool) {
 	for _, p := range config.Pools {
 		if p.Name == name {
@@ -451,11 +607,11 @@ func getPoolByName(name string) (config.Pool, bool) {
 	return config.Pool{}, false
 }
 
-// startReindexScheduler runs a periodic job which, on startup and every reindexInterval,
-// iterates through all users in the DB and gradually enqueues them for refresh via makeUpdate.
+// startReindexScheduler runs a periodic job which, on startup and every
+// reindexInterval, iterates through all users in the DB and gradually
+// enqueues them for refresh via makeUpdate.
 func startReindexScheduler(ctx context.Context) {
-	// run once immediately on startup
-	go func() { enqueueAllUsersGradually(ctx) }()
+	go enqueueAllUsersGradually(ctx)
 
 	ticker := time.NewTicker(reindexInterval)
 	defer ticker.Stop()
@@ -475,8 +631,6 @@ func startReindexScheduler(ctx context.Context) {
 func enqueueAllUsersGradually(ctx context.Context) {
 	db, _ := config.GetDBInstance()
 
-	// Global priority across entire dataset: first users without any transactions,
-	// then users with the most recent activity.
 	type orderedUser struct {
 		WalletAddress   string    `gorm:"column:wallet_address"`
 		Pool            string    `gorm:"column:pool"`
@@ -500,6 +654,14 @@ LIMIT ? OFFSET ?`, usersTable, logsTable)
 
 	batchSize := 500
 	for offset := 0; ; offset += batchSize {
+		select {
+		case <-ctx.Done():
+			return
+		case <-Shutdown:
+			return
+		default:
+		}
+
 		var rows []orderedUser
 		if err := db.Raw(query, batchSize, offset).Scan(&rows).Error; err != nil {
 			fmt.Printf("scheduler query error: %v\n", err)
@@ -521,10 +683,6 @@ LIMIT ? OFFSET ?`, usersTable, logsTable)
 			if !ok {
 				continue
 			}
-			key := MapKey{Address: u.WalletAddress, PoolName: pool.Name}
-			if _, exists := updateMap.Load(key); exists {
-				continue
-			}
 			fut := FutureUpdate{
 				Address:         u.WalletAddress,
 				ContractAddress: u.ContractAddress,
@@ -533,20 +691,143 @@ LIMIT ? OFFSET ?`, usersTable, logsTable)
 				Pool:            pool,
 				TxUtime:         u.UpdatedAt.Unix(),
 			}
-			updateMap.Store(key, fut)
+			// Reindex defers to fresh: only enqueue if no entry exists; if a
+			// fresh tx arrives later it will Store-overwrite and our queue
+			// item becomes a ghost.
+			if _, loaded := updateMap.LoadOrStore(mapKeyOf(&fut), fut); loaded {
+				continue
+			}
 			select {
-			case updateQueue <- fut:
+			case reindexQueue <- fut:
 				if u.LastUtime == 0 {
-					fmt.Printf("enqueue user: wallet=%s pool=%s sub=%d priority=no_tx last_activity=-\n", u.WalletAddress, pool.Name, u.SubaccountID)
+					fmt.Printf("enqueue user wallet=%s pool=%s sub=%d priority=no_tx\n", u.WalletAddress, pool.Name, u.SubaccountID)
 				} else {
-					fmt.Printf("enqueue user: wallet=%s pool=%s sub=%d priority=recent last_activity=%s\n", u.WalletAddress, pool.Name, u.SubaccountID, time.Unix(u.LastUtime, 0).Format(time.RFC3339))
+					fmt.Printf("enqueue user wallet=%s pool=%s sub=%d priority=recent last=%s\n",
+						u.WalletAddress, pool.Name, u.SubaccountID,
+						time.Unix(u.LastUtime, 0).Format(time.RFC3339))
 				}
 			case <-ctx.Done():
 				return
 			case <-Shutdown:
 				return
 			}
-			time.Sleep(reindexEnqueueDelay)
+
+			select {
+			case <-time.After(reindexEnqueueDelay):
+			case <-ctx.Done():
+				return
+			case <-Shutdown:
+				return
+			}
 		}
 	}
 }
+
+// ReindexAllUsersFromTonCenter is a one-shot full sweep of every known user.
+// Intended for cmd/reindexer where it owns the worker pool from start to end.
+func ReindexAllUsersFromTonCenter(ctx context.Context, cfg config.Config) {
+	db, _ := config.GetDBInstance()
+
+	workers := cfg.UserSyncWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go worker(ctx, &wg)
+	}
+
+	type minimalUser struct {
+		WalletAddress   string `gorm:"column:wallet_address"`
+		Pool            string `gorm:"column:pool"`
+		SubaccountID    int16  `gorm:"column:subaccount_id"`
+		ContractAddress string `gorm:"column:contract_address"`
+	}
+
+	const batchSize = 500
+	enqueued := 0
+enqueueLoop:
+	for offset := 0; ; offset += batchSize {
+		select {
+		case <-ctx.Done():
+			break enqueueLoop
+		default:
+		}
+
+		var rows []minimalUser
+		if err := db.Model(&config.OnchainUser{}).
+			Select("wallet_address", "pool", "subaccount_id", "contract_address").
+			Order("wallet_address asc").
+			Limit(batchSize).Offset(offset).
+			Find(&rows).Error; err != nil {
+			fmt.Printf("reindex: load users: %v\n", err)
+			break enqueueLoop
+		}
+		if len(rows) == 0 {
+			break enqueueLoop
+		}
+		for _, u := range rows {
+			pool, ok := getPoolByName(u.Pool)
+			if !ok {
+				continue
+			}
+			fut := FutureUpdate{
+				Address:         u.WalletAddress,
+				ContractAddress: u.ContractAddress,
+				SubaccountID:    u.SubaccountID,
+				CreatedAt:       time.Now().Unix(),
+				Pool:            pool,
+				// One-shot reindex: TxUtime far in the past so makeUpdate's
+				// finalization wait is skipped (we know nothing fresh just
+				// landed for these contracts).
+				TxUtime: 0,
+			}
+			if _, loaded := updateMap.LoadOrStore(mapKeyOf(&fut), fut); loaded {
+				continue
+			}
+			select {
+			case reindexQueue <- fut:
+				enqueued++
+			case <-ctx.Done():
+				break enqueueLoop
+			}
+		}
+	}
+
+	fmt.Printf("reindex: enqueued %d users; waiting for queue to drain\n", enqueued)
+
+	// Drain: wait until both queues and the dedup map are empty (or ctx cancels).
+drainLoop:
+	for {
+		mapEmpty := true
+		updateMap.Range(func(_, _ interface{}) bool { mapEmpty = false; return false })
+		if mapEmpty && len(freshQueue) == 0 && len(reindexQueue) == 0 {
+			break drainLoop
+		}
+		select {
+		case <-ctx.Done():
+			break drainLoop
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	closeShutdownOnce()
+	wg.Wait()
+	fmt.Println("reindex: done")
+}
+
+var shutdownClosed = false
+var shutdownClosedMu sync.Mutex
+
+func closeShutdownOnce() {
+	shutdownClosedMu.Lock()
+	defer shutdownClosedMu.Unlock()
+	if shutdownClosed {
+		return
+	}
+	close(Shutdown)
+	shutdownClosed = true
+}
+

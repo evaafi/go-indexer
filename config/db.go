@@ -41,6 +41,10 @@ func GetDBInstance() (*gorm.DB, error) {
 					SlowThreshold: 0,
 					LogLevel:      logger.Warn,
 					Colorful:      true,
+					// applyUserStateBoc deliberately probes for the row to
+					// detect new vs. updated; ErrRecordNotFound is a
+					// domain-level signal we handle, not a real warning.
+					IgnoreRecordNotFoundError: true,
 				},
 			),
 		})
@@ -56,10 +60,15 @@ func GetTableName(db *gorm.DB, model interface{}) string {
 
 type UserInterface interface {
 	GetWalletAddress() string
+	GetPool() string
 }
 
 func (u OnchainUser) GetWalletAddress() string {
 	return u.WalletAddress
+}
+
+func (u OnchainUser) GetPool() string {
+	return u.Pool
 }
 
 type Principals map[BigInt]BigInt
