@@ -3,9 +3,9 @@ module github.com/evaafi/go-indexer
 go 1.24.0
 
 require (
-	github.com/evaafi/evaa-go-sdk v0.0.0-20250805221838-f8b8bd3cb780
+	github.com/evaafi/evaa-go-sdk v0.0.0-20251107025414-a9acf74075f5
 	github.com/xssnick/tonutils-go v1.11.0
-	golang.org/x/time v0.12.0
+	golang.org/x/time v0.13.0
 	gopkg.in/yaml.v2 v2.4.0
 	gorm.io/driver/postgres v1.5.11
 	gorm.io/gorm v1.25.12

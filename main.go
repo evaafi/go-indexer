@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/evaafi/go-indexer/config"
 	"github.com/evaafi/go-indexer/indexer"
@@ -67,15 +66,16 @@ func main() {
 	<-sigs
 	log.Println("Received termination signal, stopping application...")
 
+	// Cancel ctx-aware goroutines (workers, fetchers, scheduler) and signal
+	// the legacy Shutdown channel for any path that doesn't take ctx. WG.Wait
+	// blocks until all workers return; with ctx propagated everywhere, that's
+	// bounded by the longest in-flight TonCenter call (≤ tonCenterTimeout).
+	cancel()
 	close(indexer.Shutdown)
-
 	indexer.WG.Wait()
+
 	fmt.Println("Saving queue")
-	err = indexer.SaveQueue()
-	if err != nil {
+	if err := indexer.SaveQueue(); err != nil {
 		fmt.Printf("Error per saving queue: %s\n", err)
 	}
-	cancel()
-
-	time.Sleep(3 * time.Second)
 }

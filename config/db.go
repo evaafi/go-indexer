@@ -41,6 +41,10 @@ func GetDBInstance() (*gorm.DB, error) {
 					SlowThreshold: 0,
 					LogLevel:      logger.Warn,
 					Colorful:      true,
+					// applyUserStateBoc deliberately probes for the row to
+					// detect new vs. updated; ErrRecordNotFound is a
+					// domain-level signal we handle, not a real warning.
+					IgnoreRecordNotFoundError: true,
 				},
 			),
 		})
@@ -108,6 +112,7 @@ func (b *BigInt) UnmarshalJSON(data []byte) error {
 type OnchainUser struct {
 	WalletAddress   string     `gorm:"primaryKey;column:wallet_address"`
 	Pool            string     `gorm:"primaryKey;column:pool"`
+	SubaccountID    int16      `gorm:"primaryKey;column:subaccount_id;default:0"`
 	ContractAddress string     `gorm:"primaryKey;unique;column:contract_address;not null"`
 	CodeVersion     int        `gorm:"column:code_version;not null"`
 	CreatedAt       time.Time  `gorm:"column:created_at;not null"`
@@ -160,6 +165,7 @@ type OnchainLog struct {
 	TxSubType                         string    `gorm:"column:tx_sub_type;"`
 	SenderAddress                     string    `gorm:"column:sender_address;not null"`
 	UserAddress                       string    `gorm:"column:user_address;not null"`
+	SubaccountID                      int16     `gorm:"column:subaccount_id;not null;default:0"`
 	AttachedAssetAddress              BigInt    `gorm:"column:attached_asset_address;type:NUMERIC"`
 	AttachedAssetAmount               BigInt    `gorm:"column:attached_asset_amount;type:NUMERIC"`
 	AttachedAssetPrincipal            BigInt    `gorm:"column:attached_asset_principal;type:NUMERIC"`
